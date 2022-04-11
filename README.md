@@ -1,4 +1,13 @@
-# RQ
+# redis-reliable-queue
+<a href="https://github.com/pedidopago/redis-reliable-queue-go">![go](https://img.shields.io/badge/go-1.18-blue)</a>
+<a href="https://github.com/pedidopago/redis-reliable-queue-js">![node-ts](https://img.shields.io/badge/js-14%2B-yellow)</a>
+
+A Go package that implements a reliable queue that uses Redis for the backend.
+It uses the RPOPLPUSH pattern:
+https://redis.io/commands/rpoplpush#pattern-reliable-queue
+
+References:
+https://blog.tuleap.org/how-we-replaced-rabbitmq-redis
 
 ```go
 import (
