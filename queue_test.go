@@ -1,0 +1,31 @@
+package rq
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"testing"
+
+	"github.com/go-redis/redis/v8"
+	"github.com/stretchr/testify/assert"
+)
+
+func TestReliableQueue(t *testing.T) {
+
+	cl := redis.NewClient(&redis.Options{
+		Addr:     os.Getenv("REDIS_ADDR"),
+		Password: os.Getenv("REDIS_PASSWORD"),
+	})
+
+	rq := New(cl, "microservices_tests_redis_reliable_queue")
+
+	ch, closefn := rq.Listen(context.Background(), "worker1")
+	defer closefn()
+
+	assert.NoError(t, rq.PushMessage(context.Background(), "default_topic", "test message"))
+	msgr := <-ch
+	assert.Equal(t, "default_topic", msgr.Topic)
+	str := ""
+	assert.NoError(t, json.Unmarshal(msgr.Content, &str))
+	assert.Equal(t, "test message", str)
+}
