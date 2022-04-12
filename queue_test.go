@@ -51,36 +51,50 @@ func TestReliableQueueSafe(t *testing.T) {
 
 	// get item 1 (and mark as ok)
 	msgh := <-ch
-	msgh(func(msg Message) error {
-		// if no error is returned, this item is safelly processed (and removed from the pending queue)
+	msgh(func(msg Message) {
+		// if this function doesn't panic, this item is safelly processed
+		// (and removed from the pending queue)
 		assert.Equal(t, "default_topic", msg.Topic)
 		var value string
 		assert.NoError(t, json.Unmarshal(msg.Content, &value))
 		assert.Equal(t, "1", value)
-		return nil
 	})
 
 	// get item 2 and fail (after processing item 3)
 	msgh2 := <-ch
 	// get item 3 (and mark as ok)
 	msgh3 := <-ch
-	msgh3(func(msg Message) error {
-		// if no error is returned, this item is safelly processed (and removed from the pending queue)
+	msgh3(func(msg Message) {
+		// if this function doesn't panic, this item is safelly processed
+		// (and removed from the pending queue)
 		assert.Equal(t, "default_topic", msg.Topic)
 		var value string
 		assert.NoError(t, json.Unmarshal(msg.Content, &value))
 		assert.Equal(t, "3", value)
-		return nil
 	})
 	// fail item 2
-	msgh2(func(msg Message) error {
-		// if an error is returned, this item is re-added to the queue
-		assert.Equal(t, "default_topic", msg.Topic)
-		var value string
-		assert.NoError(t, json.Unmarshal(msg.Content, &value))
-		assert.Equal(t, "2", value)
-		return fmt.Errorf("failing to reschedule item 2")
-	})
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				var ok bool
+				err, ok := r.(error)
+				if !ok {
+					err = fmt.Errorf("pkg: %v", r)
+					fmt.Println(err)
+				}
+			}
+			// // //
+			msgh2(func(msg Message) {
+				// if an error is returned, this item is re-added to the queue
+				assert.Equal(t, "default_topic", msg.Topic)
+				var value string
+				assert.NoError(t, json.Unmarshal(msg.Content, &value))
+				assert.Equal(t, "2", value)
+				panic("testing a panic before removing thom the list")
+			})
+			// // //
+		}()
+	}()
 
 	// at this step, the program has "crashed"
 	closefn()
@@ -92,11 +106,10 @@ func TestReliableQueueSafe(t *testing.T) {
 
 	// get item 2 again
 	msgh2 = <-ch
-	msgh2(func(msg Message) error {
+	msgh2(func(msg Message) {
 		assert.Equal(t, "default_topic", msg.Topic)
 		var value string
 		assert.NoError(t, json.Unmarshal(msg.Content, &value))
 		assert.Equal(t, "2", value)
-		return nil
 	})
 }

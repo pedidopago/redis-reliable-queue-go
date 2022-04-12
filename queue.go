@@ -104,16 +104,13 @@ func (q *ReliableQueue) waitForEventsSafe(ctx context.Context, processingQueue s
 					q.OnUnmarshalError(err)
 				}
 			} else {
-				fnc := func(wrapper SafeMessageFn) error {
-					if err := wrapper(msgx); err != nil {
-						return err
-					}
+				fnc := func(wrapper SafeMessageFn) {
+					wrapper(msgx)
 					if err := q.cl.LRem(ctx, processingQueue, 1, msg).Err(); err != nil {
 						if q.OnRedisQueueError != nil {
 							q.OnRedisQueueError(processingQueue, err)
 						}
 					}
-					return nil
 				}
 				select {
 				case ch <- fnc:
@@ -135,9 +132,9 @@ func (m Message) Empty() bool {
 	return m.Topic == "" && len(m.Content) == 0
 }
 
-type SafeMessageFn func(msg Message) error
+type SafeMessageFn func(msg Message)
 
-type SafeMessageChan func(wrapper SafeMessageFn) error
+type SafeMessageChan func(wrapper SafeMessageFn)
 
 type inMessage struct {
 	Topic   string      `json:"topic"`
