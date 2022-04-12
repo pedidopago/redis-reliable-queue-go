@@ -83,17 +83,17 @@ func TestReliableQueueSafe(t *testing.T) {
 					fmt.Println(err)
 				}
 			}
-			// // //
-			msgh2(func(msg Message) {
-				// if an error is returned, this item is re-added to the queue
-				assert.Equal(t, "default_topic", msg.Topic)
-				var value string
-				assert.NoError(t, json.Unmarshal(msg.Content, &value))
-				assert.Equal(t, "2", value)
-				panic("testing a panic before removing thom the list")
-			})
-			// // //
 		}()
+		// // //
+		msgh2(func(msg Message) {
+			// if an error is returned, this item is re-added to the queue
+			assert.Equal(t, "default_topic", msg.Topic)
+			var value string
+			assert.NoError(t, json.Unmarshal(msg.Content, &value))
+			assert.Equal(t, "2", value)
+			panic("testing a panic before removing thom the list")
+		})
+		// // //
 	}()
 
 	// at this step, the program has "crashed"
