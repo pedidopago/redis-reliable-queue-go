@@ -91,7 +91,7 @@ func TestReliableQueueSafe(t *testing.T) {
 			var value string
 			assert.NoError(t, json.Unmarshal(msg.Content, &value))
 			assert.Equal(t, "2", value)
-			panic("testing a panic before removing thom the list")
+			panic("testing a panic before removing from the list")
 		})
 		// // //
 	}()
