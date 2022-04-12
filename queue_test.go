@@ -80,10 +80,8 @@ func TestReliableQueueSafe(t *testing.T) {
 				err, ok := r.(error)
 				if !ok {
 					err = fmt.Errorf("pkg: %v", r)
-					fmt.Println(err)
-				} else {
-					fmt.Println(err)
 				}
+				fmt.Println(err)
 			}
 		}()
 		// // //
