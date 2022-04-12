@@ -1,0 +1,43 @@
+name: "Go CI"
+
+on:
+  push:
+    branches:
+      - "*"
+
+jobs:
+  ci:
+    name: CI
+    runs-on: ubuntu-latest
+    # env:
+    services:
+      redis:
+        # Docker Hub image
+        image: redis
+    steps:
+      - uses: actions/checkout@v2
+      - uses: WillAbides/setup-go-faster@v1.5.0
+        with:
+          go-version: 1.18.x
+      - uses: actions/cache@v2
+        with:
+          # In order: [Module download cache] [Linux] [Mac] [Windows]
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+            ~/Library/Caches/go-build
+            %LocalAppData%\go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+      - name: "Run tests"
+        env:
+          TEST_REDIS_HOST: "localhost:6379"
+          TEST_REDIS_PASSWORD: ""
+        run: |
+          go test -v ./...
+      - name: "Run Static Analysis"
+        run: |
+          go vet ./...
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck -go 1.18 ./...
