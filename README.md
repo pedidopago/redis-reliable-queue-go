@@ -9,6 +9,8 @@ https://redis.io/commands/rpoplpush#pattern-reliable-queue
 References:
 https://blog.tuleap.org/how-we-replaced-rabbitmq-redis
 
+[![Go CI](https://github.com/pedidopago/redis-reliable-queue-go/actions/workflows/ci.yml/badge.svg)](https://github.com/pedidopago/redis-reliable-queue-go/actions/workflows/ci.yml)
+
 ```go
 import (
     "context"
