@@ -32,7 +32,7 @@ jobs:
             ${{ runner.os }}-go-
       - name: "Run tests"
         env:
-          TEST_REDIS_HOST: "localhost:6379"
+          TEST_REDIS_ADDR: "redis:6379"
           TEST_REDIS_PASSWORD: ""
         run: |
           go test -v ./...

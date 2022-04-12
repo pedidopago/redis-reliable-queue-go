@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
@@ -13,8 +14,9 @@ import (
 func TestReliableQueue(t *testing.T) {
 
 	cl := redis.NewClient(&redis.Options{
-		Addr:     os.Getenv("TEST_REDIS_HOST"),
-		Password: os.Getenv("TEST_REDIS_PASSWORD"),
+		Addr:        os.Getenv("TEST_REDIS_ADDR"),
+		Password:    os.Getenv("TEST_REDIS_PASSWORD"),
+		DialTimeout: time.Second * 15,
 	})
 
 	rq := New(cl, "microservices_tests_redis_reliable_queue")
