@@ -81,6 +81,8 @@ func TestReliableQueueSafe(t *testing.T) {
 				if !ok {
 					err = fmt.Errorf("pkg: %v", r)
 					fmt.Println(err)
+				} else {
+					fmt.Println(err)
 				}
 			}
 		}()
