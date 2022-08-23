@@ -51,7 +51,7 @@ func main() {
     signal.Notify(exitch, os.Interrupt)
 
     // listen until the channel is closed
-    for msg := range <-listenerch {
+    for msg := range listenerch {
         fmt.Println("data received:", msg.Payload)
         _ = msg.Consume() // remove this message from the processing queue
     }
