@@ -6,6 +6,10 @@ A Go package that implements a reliable queue that uses Redis for the backend.
 It uses the RPOPLPUSH pattern:
 https://redis.io/commands/rpoplpush#pattern-reliable-queue
 
+## !Warning!
+
+This version (2.x) is **incompatible** with publishers or subscribers of **V1.x**
+
 References:
 https://blog.tuleap.org/how-we-replaced-rabbitmq-redis
 
@@ -37,29 +41,19 @@ func main() {
     // instantiate
     q := rq.New(rediscl, "my_queue_name")
     // send
-    q.PushMessage(context.TODO(), "topic", MyData{
-        Name: "John Doe",
-        Email: "jdoe@gmail.com"
-    })
+    q.PushMessage(context.TODO(), "hello!")
 
     // create a listener chan
-    listenerch, close := q.Listen(context.TODO(), os.Getenv("WORKER_ID"))
-    defer close()
+    listenerch, closechannel := q.Listen(context.TODO(), os.Getenv("WORKER_ID"))
+    defer closechannel()
 
     exitch := make(chan os.Signal, 1)
     signal.Notify(exitch, os.Interrupt)
 
-    // listen
-    for {
-        select {
-        case <-exitch:
-            // quit
-            return
-        case msg := <-listenerch:
-           var mymsg MyData
-           _ = json.Unmarshal([]byte(msg.Content), &mymsg)
-           fmt.Println("data received:", mymsg, "[topic:", msg.Topic, "]")
-        }
+    // listen until the channel is closed
+    for msg := range <-listenerch {
+        fmt.Println("data received:", msg.Payload)
+        _ = msg.Consume() // remove this message from the processing queue
     }
 }
 ```

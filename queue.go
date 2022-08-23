@@ -73,7 +73,11 @@ func (q *ReliableQueue) waitForEvents(ctx context.Context, processingQueue strin
 }
 
 type Message struct {
+	// Payload is the raw content of the message.
 	Payload string
+	// Consume will remove this message from the "worker_id" list. You
+	// must call this function exactly ONCE after the message was processed
+	// successfully from the application.
 	Consume func() error
 }
 
