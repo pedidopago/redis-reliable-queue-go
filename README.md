@@ -8,7 +8,7 @@ https://redis.io/commands/rpoplpush#pattern-reliable-queue
 
 ## !Warning!
 
-This version (2.x) is **incompatible** with publishers or subscribers of **V1.x**
+This version (3.x) is **incompatible** with publishers or subscribers of **V1.x**
 
 References:
 https://blog.tuleap.org/how-we-replaced-rabbitmq-redis
@@ -38,22 +38,31 @@ func main() {
 		Addr:    os.Getenv("REDIS_ADDR"),
 	})
 
+    ctx := context.Background()
+
     // instantiate
-    q := rq.New(rediscl, "my_queue_name")
+    q := rq.Queue{
+        RedisClient: rediscl,
+        Name: "my_queue_name",
+    }
+
+    // reschedule items after a crash
+    q.RestoreExpiredMessages(ctx)
+
     // send
-    q.PushMessage(context.TODO(), "hello!")
+    q.PushMessage(ctx, "hello!")
 
-    // create a listener chan
-    listenerch, closechannel := q.Listen(context.TODO(), os.Getenv("WORKER_ID"))
-    defer closechannel()
-
-    exitch := make(chan os.Signal, 1)
-    signal.Notify(exitch, os.Interrupt)
-
-    // listen until the channel is closed
-    for msg := range listenerch {
-        fmt.Println("data received:", msg.Payload)
-        _ = msg.Consume() // remove this message from the processing queue
+    // receive
+    receivedMsg, err := q.PopMessage(ctx, func(msg string) err error {
+        fmt.Println("received message:", msg)
+        return nil
+    })
+    if err != nil {
+        fmt.Println("[fatal] failed to process queue:", err)
+        return
+    }
+    if !receivedMsg {
+        fmt.Println("the queue was empty!")
     }
 }
 ```
