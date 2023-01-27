@@ -23,7 +23,7 @@ import (
     "os"
     "os/signal"
 
-    rq "github.com/pedidopago/redis-reliable-queue-go"
+    rq "github.com/pedidopago/redis-reliable-queue-go/v3"
     "github.com/go-redis/redis/v8"
 )
 
