@@ -54,7 +54,7 @@ func (q Queue) getListExpiration() string {
 	return lt
 }
 
-func (q Queue) PopMessage(ctx context.Context, fn func(msg string) error) (bool, error) {
+func (q Queue) PopMessage(ctx context.Context, fn func(msg string) error) error {
 	ackList := q.getAckList()
 	popcommand := "lpop"
 	if q.LeftPush {
@@ -68,24 +68,24 @@ func (q Queue) PopMessage(ctx context.Context, fn func(msg string) error) (bool,
 	t1s := strconv.FormatInt(t1, 10)
 	result, err := q.RedisClient.Eval(ctx, luaScript, []string{q.Name, ackList, t1s, q.getListExpiration(), popcommand, "rpush"}).Result()
 	if err != nil {
-		return false, err
+		return err
 	}
 	if result == nil {
-		return false, nil
+		return nil
 	}
 	rstring, ok := result.(string)
 	if !ok {
-		return false, fmt.Errorf("result is not a string")
+		return fmt.Errorf("result is not a string")
 	}
 	ackMessage := t1s + "|" + rstring
 	err = fn(rstring)
 	if err != nil {
-		return true, err
+		return err
 	}
 	if err := q.RedisClient.LRem(ctx, ackList, 1, ackMessage).Err(); err != nil {
 		fmt.Println("error removing ack message", err)
 	}
-	return true, nil
+	return nil
 }
 
 func (q Queue) RestoreExpiredMessages(ctx context.Context) {
@@ -117,4 +117,14 @@ func (q Queue) RestoreExpiredMessages(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func IsEmptyQueueError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if err.Error() == "redis: nil" {
+		return true
+	}
+	return false
 }

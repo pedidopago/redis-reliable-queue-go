@@ -48,15 +48,15 @@ func main() {
     q.PushMessage(ctx, "hello!")
 
     // receive
-    receivedMsg, err := q.PopMessage(ctx, func(msg string) err error {
+    err := q.PopMessage(ctx, func(msg string) err error {
         fmt.Println("received message:", msg)
         return nil
     })
-    if err != nil {
+    if err != nil && !rq.IsEmptyQueueError(err) {
         fmt.Println("[fatal] failed to process queue:", err)
         return
     }
-    if !receivedMsg {
+    if rq.IsEmptyQueueError(err) {
         fmt.Println("the queue was empty!")
     }
 }

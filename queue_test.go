@@ -43,10 +43,10 @@ func TestReliableQueue(t *testing.T) {
 	ch0 := make(chan struct{})
 	wg := sync.WaitGroup{}
 
-	fn1 := func() (bool, error) {
+	fn1 := func() error {
 		defer wg.Done()
 		<-ch0
-		a1, a2 := q.PopMessage(context.Background(), func(msg string) error {
+		return q.PopMessage(context.Background(), func(msg string) error {
 			vv, ok := rmap.Load(msg)
 			if !ok {
 				t.Fail()
@@ -57,12 +57,11 @@ func TestReliableQueue(t *testing.T) {
 			rmap.Store(msg, v)
 			return nil
 		})
-		return a1, a2
 	}
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
 		go func() {
-			_, _ = fn1()
+			_ = fn1()
 		}()
 	}
 
