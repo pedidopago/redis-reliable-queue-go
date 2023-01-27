@@ -1,4 +1,4 @@
-module github.com/pedidopago/redis-reliable-queue-go/v2
+module github.com/pedidopago/redis-reliable-queue-go/v3
 
 go 1.18
 
