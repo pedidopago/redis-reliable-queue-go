@@ -27,11 +27,6 @@ import (
     "github.com/go-redis/redis/v8"
 )
 
-type MyData struct {
-    Name string `json:"name"`
-    Email string `json:"email"`
-}
-
 func main() {
 
     rediscl := redis.NewClient(&redis.Options{
