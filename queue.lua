@@ -7,7 +7,7 @@ local push_command = KEYS[6]
 local element = redis.call(pop_command, list_name)
 if element then
     local prefix = item_expiration_timestamp_str .. "|"
-    redis.call(push_command, acknowledged_list, prefix .. "-" .. element)
+    redis.call(push_command, acknowledged_list, prefix .. element)
     redis.call("expire", acknowledged_list, list_expiration_time)
     redis.call("ltrim", acknowledged_list, 0, 10000)
     return element
