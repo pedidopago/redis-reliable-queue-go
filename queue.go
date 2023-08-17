@@ -88,32 +88,58 @@ func (q Queue) PopMessage(ctx context.Context, fn func(msg string) error) error 
 	return nil
 }
 
-func (q Queue) RestoreExpiredMessages(ctx context.Context) {
+const (
+	MaxAckIndex = 2000
+	AckStep     = 50
+)
+
+func (q Queue) RestoreExpiredMessages(ctx context.Context, limit int) {
 	lastIndex := 0
+	acklistRemove := make([]string, 0, MaxAckIndex)
+	ackListAdd := make([]string, 0, MaxAckIndex)
 	for ctx.Err() == nil {
-		items := q.RedisClient.LRange(ctx, q.getAckList(), int64(lastIndex), int64(lastIndex)+50).Val()
+		items := q.RedisClient.LRange(ctx, q.getAckList(), int64(lastIndex), int64(lastIndex)+AckStep).Val()
 		if len(items) == 0 {
 			break
 		}
-		lastIndex += len(items)
+		lastIndex += AckStep
+
+		if lastIndex >= MaxAckIndex {
+			fmt.Println("rqueue debug: lastIndex >= MaxAckIndex")
+			break
+		}
+
 		for _, item := range items {
 			itsplit := strings.SplitN(item, "|", 2)
 			if len(itsplit) != 2 {
-				q.RedisClient.LRem(ctx, q.getAckList(), 1, item)
+				acklistRemove = append(acklistRemove, item)
 			}
 			timestamp, err := strconv.ParseInt(itsplit[0], 10, 64)
 			if err != nil {
-				q.RedisClient.LRem(ctx, q.getAckList(), 1, item)
+				acklistRemove = append(acklistRemove, item)
 				continue
 			}
 			if time.Now().Unix() > timestamp {
+				acklistRemove = append(acklistRemove, item)
 				// item expired, will be added back to the queue
-				if q.LeftPush {
-					q.RedisClient.LPush(ctx, q.Name, itsplit[1])
-				} else {
-					q.RedisClient.RPush(ctx, q.Name, itsplit[1])
-				}
-				q.RedisClient.LRem(ctx, q.getAckList(), 1, item)
+				ackListAdd = append(ackListAdd, item)
+			}
+		}
+	}
+
+	for i := 0; i < len(acklistRemove); i++ {
+		q.RedisClient.LRem(ctx, q.getAckList(), 1, acklistRemove[i])
+	}
+
+	for i := 0; i < len(ackListAdd); i++ {
+		if _, err := q.RedisClient.LPos(ctx, q.Name, ackListAdd[i], redis.LPosArgs{
+			MaxLen: MaxAckIndex,
+			Rank:   1,
+		}).Result(); err != nil {
+			if q.LeftPush {
+				q.RedisClient.LPush(ctx, q.Name, ackListAdd[i])
+			} else {
+				q.RedisClient.RPush(ctx, q.Name, ackListAdd[i])
 			}
 		}
 	}
