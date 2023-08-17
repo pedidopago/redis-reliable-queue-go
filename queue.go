@@ -98,36 +98,34 @@ func (q Queue) RestoreExpiredMessages(ctx context.Context, limit int) {
 	if limit > 0 {
 		maxLimit = limit
 	}
-	lastIndex := 0
+
 	acklistRemove := make([]string, 0, MaxAckIndex)
 	ackListAdd := make([]string, 0, MaxAckIndex)
-	for ctx.Err() == nil {
-		items := q.RedisClient.LRange(ctx, q.getAckList(), int64(lastIndex), int64(lastIndex)+AckStep).Val()
-		if len(items) == 0 {
+
+	lookupLen := q.RedisClient.LLen(ctx, q.getAckList()).Val()
+	if int(lookupLen) > maxLimit {
+		lookupLen = int64(maxLimit)
+	}
+
+	for i := 0; i < int(lookupLen); i++ {
+		item, err := q.RedisClient.LIndex(ctx, q.getAckList(), int64(i)).Result()
+		if err != nil {
 			break
 		}
-		lastIndex += AckStep
 
-		if lastIndex >= maxLimit {
-			fmt.Println("rqueue debug: lastIndex >= MaxAckIndex")
-			break
+		itsplit := strings.SplitN(item, "|", 2)
+		if len(itsplit) != 2 {
+			acklistRemove = append(acklistRemove, item)
 		}
-
-		for _, item := range items {
-			itsplit := strings.SplitN(item, "|", 2)
-			if len(itsplit) != 2 {
-				acklistRemove = append(acklistRemove, item)
-			}
-			timestamp, err := strconv.ParseInt(itsplit[0], 10, 64)
-			if err != nil {
-				acklistRemove = append(acklistRemove, item)
-				continue
-			}
-			if time.Now().Unix() > timestamp {
-				acklistRemove = append(acklistRemove, item)
-				// item expired, will be added back to the queue
-				ackListAdd = append(ackListAdd, item)
-			}
+		timestamp, err := strconv.ParseInt(itsplit[0], 10, 64)
+		if err != nil {
+			acklistRemove = append(acklistRemove, item)
+			continue
+		}
+		if time.Now().Unix() > timestamp {
+			acklistRemove = append(acklistRemove, item)
+			// item expired, will be added back to the queue
+			ackListAdd = append(ackListAdd, itsplit[1])
 		}
 	}
 
