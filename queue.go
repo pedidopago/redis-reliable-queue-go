@@ -94,6 +94,10 @@ const (
 )
 
 func (q Queue) RestoreExpiredMessages(ctx context.Context, limit int) {
+	maxLimit := MaxAckIndex
+	if limit > 0 {
+		maxLimit = limit
+	}
 	lastIndex := 0
 	acklistRemove := make([]string, 0, MaxAckIndex)
 	ackListAdd := make([]string, 0, MaxAckIndex)
@@ -104,7 +108,7 @@ func (q Queue) RestoreExpiredMessages(ctx context.Context, limit int) {
 		}
 		lastIndex += AckStep
 
-		if lastIndex >= MaxAckIndex {
+		if lastIndex >= maxLimit {
 			fmt.Println("rqueue debug: lastIndex >= MaxAckIndex")
 			break
 		}
