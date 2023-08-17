@@ -11,8 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestReliableQueue(t *testing.T) {
-
+func testSetupRedis() *redis.Client {
 	addr := os.Getenv("TEST_REDIS_ADDR")
 	if addr == "" {
 		addr = "localhost:6379"
@@ -23,6 +22,14 @@ func TestReliableQueue(t *testing.T) {
 		Password:    os.Getenv("TEST_REDIS_PASSWORD"),
 		DialTimeout: time.Second * 15,
 	})
+
+	return cl
+}
+
+func TestReliableQueue(t *testing.T) {
+
+	cl := testSetupRedis()
+	defer cl.Close()
 
 	q := Queue{
 		RedisClient:           cl,
@@ -77,4 +84,29 @@ func TestReliableQueue(t *testing.T) {
 	assert.Equal(t, 1, v2.(int))
 	assert.Equal(t, 1, v3.(int))
 	assert.Nil(t, v4)
+}
+
+func TestAck(t *testing.T) {
+	cl := testSetupRedis()
+	defer cl.Close()
+
+	ctx, cf := context.WithTimeout(context.Background(), time.Second*20)
+	defer cf()
+
+	cl.RPush(ctx, "microservices_tests_redis_reliable_queue_ackers-ack", "0|bacon", "0|salad")
+
+	q := Queue{
+		RedisClient:           cl,
+		Name:                  "microservices_tests_redis_reliable_queue_ackers",
+		MessageExpiration:     time.Minute * 5,
+		ListExpirationSeconds: "3600",
+	}
+
+	q.RestoreExpiredMessages(ctx, 0)
+
+	it0 := cl.LRange(ctx, "microservices_tests_redis_reliable_queue_ackers", 0, -1).Val()
+
+	assert.Equal(t, 2, len(it0))
+
+	cl.Del(ctx, "microservices_tests_redis_reliable_queue_ackers")
 }

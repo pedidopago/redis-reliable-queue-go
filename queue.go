@@ -129,10 +129,6 @@ func (q Queue) RestoreExpiredMessages(ctx context.Context, limit int) {
 		}
 	}
 
-	for i := 0; i < len(acklistRemove); i++ {
-		q.RedisClient.LRem(ctx, q.getAckList(), 1, acklistRemove[i])
-	}
-
 	for i := 0; i < len(ackListAdd); i++ {
 		if _, err := q.RedisClient.LPos(ctx, q.Name, ackListAdd[i], redis.LPosArgs{
 			MaxLen: MaxAckIndex,
@@ -144,6 +140,10 @@ func (q Queue) RestoreExpiredMessages(ctx context.Context, limit int) {
 				q.RedisClient.RPush(ctx, q.Name, ackListAdd[i])
 			}
 		}
+	}
+
+	for i := 0; i < len(acklistRemove); i++ {
+		q.RedisClient.LRem(ctx, q.getAckList(), 1, acklistRemove[i])
 	}
 }
 
