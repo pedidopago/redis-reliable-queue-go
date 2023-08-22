@@ -66,7 +66,7 @@ func (q Queue) PopMessage(ctx context.Context, fn func(msg string) error) error 
 	}
 	t1 := time.Now().Add(mtimeout).Unix()
 	t1s := strconv.FormatInt(t1, 10)
-	result, err := q.RedisClient.Eval(ctx, luaScript, []string{q.Name, ackList, t1s, q.getListExpiration(), popcommand, "rpush"}).Result()
+	result, err := q.RedisClient.Eval(ctx, luaScript, []string{q.Name, ackList, t1s, q.getListExpiration(), popcommand, "lpush"}).Result()
 	if err != nil {
 		return err
 	}
