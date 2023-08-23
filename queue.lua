@@ -15,14 +15,14 @@ local time_now_ts = tonumber(unix_time_now_str)
 
 if ack_len > 0 then
     for i = 0, ack_len, 1 do
-        local litem = redis.call("lindex", acknowledged_list, i)
-        if not litem then break end
-        local litemlen = string.len(litem)
+        local raw_ack_item = redis.call("lindex", acknowledged_list, i)
+        if not raw_ack_item then break end
+        local item_str_len = string.len(raw_ack_item)
 
         local ts_string = nil
-        for idx = 1, litemlen do
-            if litem:byte(idx) == time_split_char then
-                ts_string = string.sub(litem, 1, idx-1)
+        for idx = 1, item_str_len do
+            if raw_ack_item:byte(idx) == time_split_char then
+                ts_string = string.sub(raw_ack_item, 1, idx-1)
                 break
             end
         end
@@ -31,8 +31,8 @@ if ack_len > 0 then
             local ts = tonumber(ts_string)
             if ts ~= nil and time_now_ts ~= nil and ts < time_now_ts then
                 -- we need to remove this item from the ack list and then return it
-                local data_without_ts = string.sub(litem, string.len(ts_string)+2)
-                redis.call("lrem", acknowledged_list, 1, litem)
+                local data_without_ts = string.sub(raw_ack_item, string.len(ts_string)+2)
+                redis.call("lrem", acknowledged_list, 1, raw_ack_item)
                 return data_without_ts
             end
         end
