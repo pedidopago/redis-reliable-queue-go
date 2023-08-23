@@ -42,6 +42,7 @@ if ack_len > 0 then
                 -- we need to remove this item from the ack list and then return it
                 local data_without_ts = string.sub(raw_ack_item, string.len(ts_string)+2)
                 redis.call("lrem", acknowledged_list, 1, raw_ack_item)
+                redis.call("rpush", acknowledged_list, item_expiration_timestamp_str .. "|" .. data_without_ts)
                 return data_without_ts
             else
                 -- this is the oldest item in the list and it did not expire,
