@@ -27,13 +27,26 @@ if ack_len > 0 then
             end
         end
 
-        if ts_string ~= nil then
-            local ts = tonumber(ts_string)
-            if ts ~= nil and time_now_ts ~= nil and ts < time_now_ts then
+        if ts_string == nil then
+            -- this should NEVER happen, unless someone manually added garbage inside this list
+            -- add this item to a debug list
+            redis.call("rpush", acknowledged_list .. "-bug", raw_ack_item)
+            redis.call("ltrim", acknowledged_list .. "-bug", 0, 10)
+            redis.call("lrem", acknowledged_list, 1, raw_ack_item)
+            break
+        end
+        
+        local ts = tonumber(ts_string)
+        if ts ~= nil and time_now_ts ~= nil then
+            if ts < time_now_ts then
                 -- we need to remove this item from the ack list and then return it
                 local data_without_ts = string.sub(raw_ack_item, string.len(ts_string)+2)
                 redis.call("lrem", acknowledged_list, 1, raw_ack_item)
                 return data_without_ts
+            else
+                -- this is the oldest item in the list and it did not expire,
+                -- so it's safe to exit this lindex loop here
+                break
             end
         end
     end
