@@ -3,6 +3,7 @@ package rq
 import (
 	"context"
 	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -109,4 +110,50 @@ func TestAck(t *testing.T) {
 	assert.Equal(t, 2, len(it0))
 
 	cl.Del(ctx, "microservices_tests_redis_reliable_queue_ackers")
+}
+
+func TestAutoAckRecover(t *testing.T) {
+	cl := testSetupRedis()
+	defer cl.Close()
+
+	ctx, cf := context.WithTimeout(context.Background(), time.Second*20)
+	defer cf()
+
+	tn0 := strconv.FormatInt(time.Now().Add(time.Minute*5).Unix(), 10)
+	unremovable := tn0 + "|shouldnotremove"
+
+	cl.RPush(ctx, "microservices_tests_redis_reliable_queue_ackers_auto-ack", "0|bacon", "0|salad", unremovable)
+
+	defer cl.Del(ctx, "microservices_tests_redis_reliable_queue_ackers_auto-ack")
+	defer cl.Del(ctx, "microservices_tests_redis_reliable_queue_ackers_auto")
+
+	q := Queue{
+		RedisClient:           cl,
+		Name:                  "microservices_tests_redis_reliable_queue_ackers_auto",
+		MessageExpiration:     time.Minute,
+		ListExpirationSeconds: "3600",
+	}
+
+	assert.NoError(t, q.PopMessage(ctx, func(msg string) error {
+		assert.Equal(t, "bacon", msg)
+		return nil
+	}))
+
+	assert.NoError(t, q.PopMessage(ctx, func(msg string) error {
+		assert.Equal(t, "salad", msg)
+		return nil
+	}))
+
+	assert.Error(t, q.PopMessage(ctx, func(msg string) error {
+		assert.Equal(t, "", msg)
+		return nil
+	}))
+
+	newLen := cl.LLen(ctx, "microservices_tests_redis_reliable_queue_ackers_auto-ack").Val()
+	if !assert.Equal(t, int64(1), newLen) {
+		slc := cl.LRange(ctx, "microservices_tests_redis_reliable_queue_ackers_auto-ack", 0, -1).Val()
+		for _, v := range slc {
+			t.Log(v)
+		}
+	}
 }

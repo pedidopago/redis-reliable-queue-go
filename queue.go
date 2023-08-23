@@ -18,10 +18,15 @@ var (
 	luaScript string
 )
 
+const (
+	DefaultAckLimit = 10000
+)
+
 type Queue struct {
 	RedisClient           *redis.Client
 	Name                  string
 	AckSuffix             string
+	AckLimit              int
 	LeftPush              bool
 	MessageExpiration     time.Duration // default 20m
 	ListExpirationSeconds string        // default "3600" (1h)
@@ -64,9 +69,12 @@ func (q Queue) PopMessage(ctx context.Context, fn func(msg string) error) error 
 	if q.MessageExpiration != 0 {
 		mtimeout = q.MessageExpiration
 	}
-	t1 := time.Now().Add(mtimeout).Unix()
+	tnow := time.Now()
+	tnowString := strconv.FormatInt(tnow.Unix(), 10)
+	t1 := tnow.Add(mtimeout).Unix()
 	t1s := strconv.FormatInt(t1, 10)
-	result, err := q.RedisClient.Eval(ctx, luaScript, []string{q.Name, ackList, t1s, q.getListExpiration(), popcommand, "lpush"}).Result()
+	ackListLimit := strconv.Itoa(nonzero(q.AckLimit, DefaultAckLimit))
+	result, err := q.RedisClient.Eval(ctx, luaScript, []string{q.Name, ackList, tnowString, t1s, q.getListExpiration(), popcommand, ackListLimit}).Result()
 	if err != nil {
 		return err
 	}
@@ -93,6 +101,9 @@ const (
 	AckStep     = 50
 )
 
+// RestoreExpiredMessages will restore expired messages back to the queue.
+//
+// Deprecated: this is handled by the redis lua script on every call to PopMessage().
 func (q Queue) RestoreExpiredMessages(ctx context.Context, limit int) {
 	maxLimit := MaxAckIndex
 	if limit > 0 {
@@ -155,4 +166,13 @@ func IsEmptyQueueError(err error) bool {
 		return true
 	}
 	return false
+}
+
+func nonzero(v ...int) int {
+	for _, i := range v {
+		if i != 0 {
+			return i
+		}
+	}
+	return 0
 }
