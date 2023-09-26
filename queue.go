@@ -59,41 +59,120 @@ func (q Queue) getListExpiration() string {
 	return lt
 }
 
-func (q Queue) PopMessage(ctx context.Context, fn func(msg string) error) error {
-	ackList := q.getAckList()
+func (q Queue) getPopCommand() string {
 	popcommand := "lpop"
 	if q.LeftPush {
 		popcommand = "rpop"
 	}
+
+	return popcommand
+}
+
+func (q Queue) getMessageTimeout() time.Duration {
 	mtimeout := time.Minute * 20
+
 	if q.MessageExpiration != 0 {
 		mtimeout = q.MessageExpiration
 	}
+
+	return mtimeout
+}
+
+func (q Queue) noop() {}
+
+func (q Queue) doPopEval(ctx context.Context) (result string, removefn func(), err error) {
+	ackList := q.getAckList()
+	popcommand := q.getPopCommand()
+	mtimeout := q.getMessageTimeout()
 	tnow := time.Now()
 	tnowString := strconv.FormatInt(tnow.Unix(), 10)
 	t1 := tnow.Add(mtimeout).Unix()
 	t1s := strconv.FormatInt(t1, 10)
 	ackListLimit := strconv.Itoa(nonzero(q.AckLimit, DefaultAckLimit))
-	result, err := q.RedisClient.Eval(ctx, luaScript, []string{q.Name, ackList, tnowString, t1s, q.getListExpiration(), popcommand, ackListLimit}).Result()
+
+	iresult, err := q.RedisClient.Eval(ctx, luaScript, []string{q.Name, ackList, tnowString, t1s, q.getListExpiration(), popcommand, ackListLimit}).Result()
+	if err != nil {
+		return "", q.noop, err
+	}
+	if iresult == nil {
+		return "", q.noop, nil
+	}
+	result, ok := iresult.(string)
+	if !ok {
+		return "", q.noop, fmt.Errorf("result is not a string")
+	}
+
+	ackMessage := t1s + "|" + result
+
+	removefn = func() {
+		if err := q.RedisClient.LRem(ctx, ackList, 1, ackMessage).Err(); err != nil {
+			fmt.Println("error removing ack message", err)
+		}
+	}
+
+	return result, removefn, nil
+}
+
+func (q Queue) PopMessage(ctx context.Context, fn func(msg string) error) error {
+	result, removefn, err := q.doPopEval(ctx)
+
 	if err != nil {
 		return err
 	}
-	if result == nil {
+
+	if result == "" {
 		return nil
 	}
-	rstring, ok := result.(string)
-	if !ok {
-		return fmt.Errorf("result is not a string")
-	}
-	ackMessage := t1s + "|" + rstring
-	err = fn(rstring)
+
+	err = fn(result)
+
 	if err != nil {
 		return err
 	}
-	if err := q.RedisClient.LRem(ctx, ackList, 1, ackMessage).Err(); err != nil {
-		fmt.Println("error removing ack message", err)
-	}
+
+	removefn()
+
 	return nil
+}
+
+type ChannelMessage struct {
+	Message    string
+	Err        error
+	AckMessage func()
+}
+
+func (q Queue) Channel(ctx context.Context) (channel <-chan *ChannelMessage) {
+	ch := make(chan *ChannelMessage, 256)
+
+	go func() {
+		for ctx.Err() == nil {
+			result, removefn, err := q.doPopEval(ctx)
+
+			if err != nil {
+				ch <- &ChannelMessage{Err: err, AckMessage: q.noop}
+				continue
+			}
+
+			if result == "" {
+				select {
+				case <-ctx.Done():
+					close(ch)
+
+					return
+				case <-time.After(time.Millisecond * 100):
+					// noop
+				}
+				continue
+			}
+
+			ch <- &ChannelMessage{
+				Message:    result,
+				AckMessage: removefn,
+			}
+		}
+	}()
+
+	return ch
 }
 
 const (
