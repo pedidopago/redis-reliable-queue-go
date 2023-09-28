@@ -149,6 +149,19 @@ func (q Queue) Channel(ctx context.Context) (channel <-chan *ChannelMessage) {
 			result, removefn, err := q.doPopEval(ctx)
 
 			if err != nil {
+
+				if err == redis.Nil {
+					select {
+					case <-ctx.Done():
+						close(ch)
+
+						return
+					case <-time.After(time.Millisecond * 100):
+						// noop
+					}
+					continue
+				}
+
 				ch <- &ChannelMessage{Err: err, AckMessage: q.noop}
 				continue
 			}
