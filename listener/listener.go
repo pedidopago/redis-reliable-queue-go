@@ -173,16 +173,16 @@ func RegisterTopicHandlerWithRetry[T INumberOfRetries](l *Listener, topic string
 					})
 					return err
 				}
-				v.IncrementNumberOfRetries()
-				if serr := rq.New(l.redis, l.queueName).PushMessage(ctx, topic, v); err != nil {
-					l.OnRedisError(l, &ErrorDetails{
-						Cause:       serr,
-						Topic:       topic,
-						RawMessage:  m,
-						Description: "redis.PushMessage into queue failed",
-					})
-					return err
-				}
+			}
+			v.IncrementNumberOfRetries()
+			if serr := rq.New(l.redis, l.queueName).PushMessage(ctx, topic, v); err != nil {
+				l.OnRedisError(l, &ErrorDetails{
+					Cause:       serr,
+					Topic:       topic,
+					RawMessage:  m,
+					Description: "redis.PushMessage into queue failed",
+				})
+				return err
 			}
 		}
 		return nil
