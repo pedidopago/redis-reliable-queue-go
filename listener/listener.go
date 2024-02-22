@@ -34,6 +34,7 @@ type Listener struct {
 	OnUnmarshalError  func(l *Listener, details *ErrorDetails)
 	OnRedisError      func(l *Listener, details *ErrorDetails)
 	OnHandlerError    func(l *Listener, details *ErrorDetails)
+	OnRetriesExceeded func(l *Listener, details *ErrorDetails)
 }
 
 func (l *Listener) GetQueueName() string {
@@ -63,6 +64,9 @@ func (l *Listener) initCallbacks() {
 	}
 	if l.OnHandlerError == nil {
 		l.OnHandlerError = func(_ *Listener, _ *ErrorDetails) {}
+	}
+	if l.OnRetriesExceeded == nil {
+		l.OnRetriesExceeded = func(_ *Listener, _ *ErrorDetails) {}
 	}
 }
 
@@ -163,6 +167,12 @@ func RegisterTopicHandlerWithRetry[T INumberOfRetries](l *Listener, topic string
 				RawMessage: m,
 			})
 			if v.GetNumberOfRetries() >= maxRetries {
+				l.OnRetriesExceeded(l, &ErrorDetails{
+					Cause:       err,
+					Topic:       topic,
+					RawMessage:  m,
+					Description: fmt.Sprintf("max number of retries exceeded (%d / %d)", v.GetNumberOfRetries(), maxRetries),
+				}
 				v.ResetNumberOfRetries()
 				if err := rq.New(l.redis, l.errorQueueName).PushMessage(ctx, topic, v); err != nil {
 					l.OnRedisError(l, &ErrorDetails{
