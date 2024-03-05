@@ -172,7 +172,7 @@ func RegisterTopicHandlerWithRetry[T INumberOfRetries](l *Listener, topic string
 					Topic:       topic,
 					RawMessage:  m,
 					Description: fmt.Sprintf("max number of retries exceeded (%d / %d)", v.GetNumberOfRetries(), maxRetries),
-				}
+				})
 				v.ResetNumberOfRetries()
 				if err := rq.New(l.redis, l.errorQueueName).PushMessage(ctx, topic, v); err != nil {
 					l.OnRedisError(l, &ErrorDetails{
