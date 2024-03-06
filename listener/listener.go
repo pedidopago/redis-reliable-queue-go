@@ -183,6 +183,7 @@ func RegisterTopicHandlerWithRetry[T INumberOfRetries](l *Listener, topic string
 					})
 					return err
 				}
+				return nil
 			}
 			v.IncrementNumberOfRetries()
 			if serr := rq.New(l.redis, l.queueName).PushMessage(ctx, topic, v); serr != nil {
