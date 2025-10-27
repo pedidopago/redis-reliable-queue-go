@@ -5,7 +5,7 @@ go 1.18
 require (
 	github.com/go-redis/redis/v8 v8.6.0
 	github.com/pedidopago/go-common v0.0.9-0.20230404140246-8916eda450a1
-	github.com/redis/go-redis/v9 v9.16.0
+	github.com/redis/go-redis/v9 v9.14.1
 	github.com/stretchr/testify v1.8.1
 )
 
