@@ -3,7 +3,7 @@ module github.com/pedidopago/redis-reliable-queue-go/v2
 go 1.18
 
 require (
-	github.com/redis/go-redis/v9 v9.16.0
+	github.com/redis/go-redis/v9 v9.14.1
 	github.com/stretchr/testify v1.7.0
 )
 
