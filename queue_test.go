@@ -51,26 +51,28 @@ func TestReliableQueueSafe(t *testing.T) {
 
 	// get item 1 (and mark as ok)
 	msgh := <-ch
-	msgh(func(msg Message) {
+	msgh(func(msg Message) (ack bool) {
 		// if this function doesn't panic, this item is safelly processed
 		// (and removed from the pending queue)
 		assert.Equal(t, "default_topic", msg.Topic)
 		var value string
 		assert.NoError(t, json.Unmarshal(msg.Content, &value))
 		assert.Equal(t, "1", value)
+		return true
 	})
 
 	// get item 2 and fail (after processing item 3)
 	msgh2 := <-ch
 	// get item 3 (and mark as ok)
 	msgh3 := <-ch
-	msgh3(func(msg Message) {
+	msgh3(func(msg Message) (ack bool) {
 		// if this function doesn't panic, this item is safelly processed
 		// (and removed from the pending queue)
 		assert.Equal(t, "default_topic", msg.Topic)
 		var value string
 		assert.NoError(t, json.Unmarshal(msg.Content, &value))
 		assert.Equal(t, "3", value)
+		return true
 	})
 	// fail item 2
 	func() {
@@ -85,7 +87,7 @@ func TestReliableQueueSafe(t *testing.T) {
 			}
 		}()
 		// // //
-		msgh2(func(msg Message) {
+		msgh2(func(msg Message) (ack bool) {
 			// if an error is returned, this item is re-added to the queue
 			assert.Equal(t, "default_topic", msg.Topic)
 			var value string
@@ -106,10 +108,11 @@ func TestReliableQueueSafe(t *testing.T) {
 
 	// get item 2 again
 	msgh2 = <-ch
-	msgh2(func(msg Message) {
+	msgh2(func(msg Message) (ack bool) {
 		assert.Equal(t, "default_topic", msg.Topic)
 		var value string
 		assert.NoError(t, json.Unmarshal(msg.Content, &value))
 		assert.Equal(t, "2", value)
+		return true
 	})
 }

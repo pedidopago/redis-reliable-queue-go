@@ -105,10 +105,11 @@ func (q *ReliableQueue) waitForEventsSafe(ctx context.Context, processingQueue s
 				}
 			} else {
 				fnc := func(wrapper SafeMessageFn) {
-					wrapper(msgx)
-					if err := q.cl.LRem(ctx, processingQueue, 1, msg).Err(); err != nil {
-						if q.OnRedisQueueError != nil {
-							q.OnRedisQueueError(processingQueue, err)
+					if wrapper(msgx) {
+						if err := q.cl.LRem(ctx, processingQueue, 1, msg).Err(); err != nil {
+							if q.OnRedisQueueError != nil {
+								q.OnRedisQueueError(processingQueue, err)
+							}
 						}
 					}
 				}
@@ -132,7 +133,7 @@ func (m Message) Empty() bool {
 	return m.Topic == "" && len(m.Content) == 0
 }
 
-type SafeMessageFn func(msg Message)
+type SafeMessageFn func(msg Message) (ack bool)
 
 type SafeMessageChan func(wrapper SafeMessageFn)
 

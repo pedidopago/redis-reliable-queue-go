@@ -218,13 +218,11 @@ func listen(ctx context.Context, queue *rq.ReliableQueue, workerID string, callb
 	defer cl()
 
 	for fn := range ch {
-		fn(func(m rq.Message) {
-			<-workersChan
-			go func() {
-				defer func() { workersChan <- nil }()
-				fn(callback)
-			}()
-		})
+		<-workersChan
+		go func(fn rq.SafeMessageChan) {
+			defer func() { workersChan <- nil }()
+			fn(callback)
+		}(fn)
 	}
 }
 
@@ -253,7 +251,7 @@ func (l *Listener) Listen(ctx context.Context, redisCl *redis.Client, workers ui
 			Description: fmt.Sprintf("error in queue %s", name),
 		})
 	}
-	listen(ctx, queue, l.workedID, func(msg rq.Message) {
+	listen(ctx, queue, l.workedID, func(msg rq.Message) (ack bool) {
 		l.OnMessageReceived(l, msg)
 		handlerFn := l.topicHandlerRegistry[msg.Topic]
 		if handlerFn == nil {
@@ -261,7 +259,7 @@ func (l *Listener) Listen(ctx context.Context, redisCl *redis.Client, workers ui
 			handlerFn = l.topicHandlerRegistry[globalHandlerKey]
 			if handlerFn == nil {
 				l.OnUnhandledTopic(l, msg.Topic)
-				return
+				return true
 			}
 		}
 		if err := handlerFn(ctx, msg.Content); err != nil {
@@ -270,6 +268,8 @@ func (l *Listener) Listen(ctx context.Context, redisCl *redis.Client, workers ui
 				Topic:      msg.Topic,
 				RawMessage: msg.Content,
 			})
+			return false
 		}
+		return true
 	}, workers)
 }
