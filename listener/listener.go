@@ -3,6 +3,7 @@ package listener
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -73,7 +74,7 @@ func (l *Listener) initCallbacks() {
 func (l *Listener) reprocessErrorEvents(ctx context.Context) {
 	for {
 		if err := l.redis.RPopLPush(ctx, l.errorQueueName, l.queueName).Err(); err != nil {
-			if err != redis.Nil {
+			if !errors.Is(err, redis.Nil) {
 				l.OnRedisError(l, &ErrorDetails{
 					Cause:       err,
 					Description: "RPopLPush failed",
@@ -245,10 +246,16 @@ func (l *Listener) Listen(ctx context.Context, redisCl *redis.Client, workers ui
 	}
 
 	queue := rq.New(redisCl, l.queueName)
-	queue.OnRedisQueueError = func(name string, err error) {
+	queue.OnRedisError = func(err error) {
 		l.OnRedisError(l, &ErrorDetails{
 			Cause:       err,
-			Description: fmt.Sprintf("error in queue %s", name),
+			Description: fmt.Sprintf("redis error in queue %s", l.queueName),
+		})
+	}
+	queue.OnUnmarshalError = func(err error) {
+		l.OnUnmarshalError(l, &ErrorDetails{
+			Cause:       err,
+			Description: fmt.Sprintf("unmarshal error in queue %s", l.queueName),
 		})
 	}
 	listen(ctx, queue, l.workedID, func(msg rq.Message) (ack bool) {
