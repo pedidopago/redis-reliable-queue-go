@@ -167,11 +167,15 @@ func (q *ReliableQueue) waitForEventsSafe(ctx context.Context, workerId string, 
 			continue
 		}
 		var fnc = func(wrapper SafeMessageFn) {
-			if wrapper(*msg) {
-				if err := q.cl.HDel(ctx, processingHash, msgKey).Err(); err != nil {
-					q.OnRedisError(fmt.Errorf("HDel failed after ack: %w", err))
+			var ack = make(chan bool)
+			go func() {
+				if <-ack {
+					if err := q.cl.HDel(ctx, processingHash, msgKey).Err(); err != nil {
+						q.OnRedisError(fmt.Errorf("HDel failed after ack: %w", err))
+					}
 				}
-			}
+			}()
+			wrapper(*msg, ack)
 		}
 		select {
 		case ch <- fnc:
@@ -191,7 +195,7 @@ func (m Message) Empty() bool {
 	return m.Topic == "" && len(m.Content) == 0
 }
 
-type SafeMessageFn func(msg Message) (ack bool)
+type SafeMessageFn func(msg Message, ack chan<- bool)
 
 type SafeMessageChan func(wrapper SafeMessageFn)
 
