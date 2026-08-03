@@ -3,6 +3,7 @@ package rq
 import (
 	"context"
 	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -109,4 +110,34 @@ func TestAck(t *testing.T) {
 	assert.Equal(t, 2, len(it0))
 
 	cl.Del(ctx, "microservices_tests_redis_reliable_queue_ackers")
+}
+
+func TestRestoreExpiredMessagesKeepsUnexpired(t *testing.T) {
+	cl := testSetupRedis()
+	defer cl.Close()
+
+	ctx, cf := context.WithTimeout(context.Background(), time.Second*20)
+	defer cf()
+
+	const name = "microservices_tests_redis_reliable_queue_restore"
+	cl.Del(ctx, name, name+"-ack")
+
+	future := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+	cl.RPush(ctx, name+"-ack", "0|expired", future+"|fresh", "no-separator")
+
+	q := Queue{
+		RedisClient:           cl,
+		Name:                  name,
+		MessageExpiration:     time.Minute * 5,
+		ListExpirationSeconds: "3600",
+	}
+
+	q.RestoreExpiredMessages(ctx, 0)
+
+	// only the expired message goes back to the queue
+	assert.Equal(t, []string{"expired"}, cl.LRange(ctx, name, 0, -1).Val())
+	// the unexpired ack entry survives; the malformed one is dropped
+	assert.Equal(t, []string{future + "|fresh"}, cl.LRange(ctx, name+"-ack", 0, -1).Val())
+
+	cl.Del(ctx, name, name+"-ack")
 }

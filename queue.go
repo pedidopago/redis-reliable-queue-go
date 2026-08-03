@@ -99,20 +99,25 @@ func (q Queue) RestoreExpiredMessages(ctx context.Context, limit int) {
 		maxLimit = limit
 	}
 
-	acklistRemove := make([]string, 0, MaxAckIndex)
-	ackListAdd := make([]string, 0, MaxAckIndex)
-
 	lookupLen := q.RedisClient.LLen(ctx, q.getAckList()).Val()
 	if int(lookupLen) > maxLimit {
 		lookupLen = int64(maxLimit)
 	}
+	if lookupLen == 0 {
+		return
+	}
 
-	for i := 0; i < int(lookupLen); i++ {
-		item, err := q.RedisClient.LIndex(ctx, q.getAckList(), int64(i)).Result()
-		if err != nil {
-			break
-		}
+	// One LRANGE instead of one LIndex per index: same data, 1 round trip
+	// instead of up to MaxAckIndex of them.
+	items, err := q.RedisClient.LRange(ctx, q.getAckList(), 0, lookupLen-1).Result()
+	if err != nil {
+		return
+	}
 
+	acklistRemove := make([]string, 0, len(items))
+	ackListAdd := make([]string, 0, len(items))
+
+	for _, item := range items {
 		itsplit := strings.SplitN(item, "|", 2)
 		if len(itsplit) != 2 {
 			acklistRemove = append(acklistRemove, item)
