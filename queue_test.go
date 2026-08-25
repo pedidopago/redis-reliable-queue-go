@@ -185,7 +185,13 @@ func TestPopMessageWithAck(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "with ack 1", msg)
 	assert.Equal(t, int64(1), cl.LLen(ctx, qname+"-ack").Val())
-	ack()
+	assert.NoError(t, ack(ctx))
+	assert.Equal(t, int64(0), cl.LLen(ctx, qname+"-ack").Val())
+
+	// ack is a no-op after it succeeded. Entries are "<expiry>|<payload>", so
+	// two identical payloads popped in the same second are byte-identical and a
+	// second removal would delete another consumer's in-flight entry.
+	assert.NoError(t, ack(ctx))
 	assert.Equal(t, int64(0), cl.LLen(ctx, qname+"-ack").Val())
 
 	// pop without ack: the message must stay on the ack list for redelivery
@@ -199,7 +205,7 @@ func TestPopMessageWithAck(t *testing.T) {
 	assert.True(t, IsEmptyQueueError(err))
 	assert.Equal(t, "", msg)
 	assert.NotNil(t, ack)
-	ack()
+	assert.NoError(t, ack(ctx))
 
 	// the unacked message is still there, untouched by the empty pop
 	assert.Equal(t, int64(1), cl.LLen(ctx, qname+"-ack").Val())
@@ -312,4 +318,106 @@ func TestChannelGoroutineExitsWhenBufferFullAndConsumerStops(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatal("Channel goroutine stayed parked on a full buffer after cancellation")
+}
+
+// TestPopMessageWithAckSurvivesPopContextCancellation pins the contract that
+// makes ack take its own context: acking happens after processing, which is
+// exactly when the pop's context is most likely already cancelled. An ack bound
+// to that dead context would silently do nothing and the message would be
+// reprocessed after MessageExpiration.
+func TestPopMessageWithAckSurvivesPopContextCancellation(t *testing.T) {
+	cl := testSetupRedis()
+	defer cl.Close()
+
+	live := context.Background()
+
+	const qname = "microservices_tests_redis_reliable_queue_ack_after_cancel"
+	cl.Del(live, qname, qname+"-ack")
+	defer cl.Del(live, qname, qname+"-ack")
+
+	q := Queue{RedisClient: cl, Name: qname, MessageExpiration: time.Minute * 5}
+	assert.NoError(t, q.PushMessage(live, "outlives its pop ctx"))
+
+	popCtx, cancelPop := context.WithCancel(live)
+	msg, ack, err := q.PopMessageWithAck(popCtx)
+	assert.NoError(t, err)
+	assert.Equal(t, "outlives its pop ctx", msg)
+	assert.Equal(t, int64(1), cl.LLen(live, qname+"-ack").Val())
+
+	// The shutdown shape: the pop's context dies before the consumer acks.
+	cancelPop()
+
+	assert.NoError(t, ack(live))
+	assert.Equal(t, int64(0), cl.LLen(live, qname+"-ack").Val())
+}
+
+// TestPopMessageWithAckReportsFailure pins the other half: a failed ack is
+// returned rather than swallowed, so the caller can retry instead of believing
+// the message was acknowledged.
+func TestPopMessageWithAckReportsFailure(t *testing.T) {
+	cl := testSetupRedis()
+	defer cl.Close()
+
+	live := context.Background()
+
+	const qname = "microservices_tests_redis_reliable_queue_ack_failure"
+	cl.Del(live, qname, qname+"-ack")
+	defer cl.Del(live, qname, qname+"-ack")
+
+	q := Queue{RedisClient: cl, Name: qname, MessageExpiration: time.Minute * 5}
+	assert.NoError(t, q.PushMessage(live, "ack will fail"))
+
+	_, ack, err := q.PopMessageWithAck(live)
+	assert.NoError(t, err)
+
+	dead, cancel := context.WithCancel(live)
+	cancel()
+
+	assert.Error(t, ack(dead), "a failed ack must surface, not be swallowed")
+	// Still retryable: the failure did not mark it acknowledged.
+	assert.NoError(t, ack(live))
+	assert.Equal(t, int64(0), cl.LLen(live, qname+"-ack").Val())
+}
+
+// TestPopMessageWithAckDoesNotStealAnotherEntry is the reason ack is
+// idempotent. Ack-list entries are "<expiry>|<payload>", so two identical
+// payloads popped within the same second are byte-identical. LRem(..., 1, ...)
+// cannot tell them apart, so a consumer acking twice would remove the entry
+// belonging to whoever else is still holding that message -- and that message
+// would then never be redelivered if its consumer died.
+func TestPopMessageWithAckDoesNotStealAnotherEntry(t *testing.T) {
+	cl := testSetupRedis()
+	defer cl.Close()
+
+	live := context.Background()
+
+	const qname = "microservices_tests_redis_reliable_queue_ack_steal"
+	cl.Del(live, qname, qname+"-ack")
+	defer cl.Del(live, qname, qname+"-ack")
+
+	q := Queue{RedisClient: cl, Name: qname, MessageExpiration: time.Minute * 5}
+	assert.NoError(t, q.PushMessage(live, "identical"))
+	assert.NoError(t, q.PushMessage(live, "identical"))
+
+	// Align just past a second boundary so both pops share an expiry stamp,
+	// which is what makes the two ack entries byte-identical.
+	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second)) + 20*time.Millisecond)
+
+	_, ackA, err := q.PopMessageWithAck(live)
+	assert.NoError(t, err)
+	_, ackB, err := q.PopMessageWithAck(live)
+	assert.NoError(t, err)
+	_ = ackB // B is still processing its copy
+
+	entries := cl.LRange(live, qname+"-ack", 0, -1).Val()
+	if len(entries) != 2 || entries[0] != entries[1] {
+		t.Skipf("could not construct byte-identical ack entries (%v); second boundary raced", entries)
+	}
+
+	assert.NoError(t, ackA(live))
+	assert.Equal(t, int64(1), cl.LLen(live, qname+"-ack").Val())
+
+	// A acking again must NOT consume B's still-in-flight entry.
+	assert.NoError(t, ackA(live))
+	assert.Equal(t, int64(1), cl.LLen(live, qname+"-ack").Val(), "second ack stole another consumer's entry")
 }

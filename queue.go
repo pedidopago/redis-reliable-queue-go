@@ -5,9 +5,11 @@ package rq
 import (
 	"context"
 	_ "embed"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -80,7 +82,10 @@ func (q Queue) getMessageTimeout() time.Duration {
 
 func (q Queue) noop() {}
 
-func (q Queue) doPopEval(ctx context.Context) (result string, removefn func(), err error) {
+// doPopEvalEntry runs the pop script and returns the raw ack-list entry rather
+// than a closure, so each caller decides the ack's context and lifetime. An
+// empty ackEntry means the queue had nothing to hand out.
+func (q Queue) doPopEvalEntry(ctx context.Context) (result string, ackEntry string, err error) {
 	ackList := q.getAckList()
 	popcommand := q.getPopCommand()
 	mtimeout := q.getMessageTimeout()
@@ -92,20 +97,29 @@ func (q Queue) doPopEval(ctx context.Context) (result string, removefn func(), e
 
 	iresult, err := q.RedisClient.Eval(ctx, luaScript, []string{q.Name, ackList, tnowString, t1s, q.getListExpiration(), popcommand, ackListLimit}).Result()
 	if err != nil {
-		return "", q.noop, err
+		return "", "", err
 	}
 	if iresult == nil {
-		return "", q.noop, nil
+		return "", "", nil
 	}
 	result, ok := iresult.(string)
 	if !ok {
-		return "", q.noop, fmt.Errorf("result is not a string")
+		return "", "", fmt.Errorf("result is not a string")
 	}
 
-	ackMessage := t1s + "|" + result
+	return result, t1s + "|" + result, nil
+}
+
+func (q Queue) doPopEval(ctx context.Context) (result string, removefn func(), err error) {
+	result, ackEntry, err := q.doPopEvalEntry(ctx)
+	if err != nil || ackEntry == "" {
+		return result, q.noop, err
+	}
+
+	ackList := q.getAckList()
 
 	removefn = func() {
-		if err := q.RedisClient.LRem(ctx, ackList, 1, ackMessage).Err(); err != nil {
+		if err := q.RedisClient.LRem(ctx, ackList, 1, ackEntry).Err(); err != nil {
 			fmt.Println("error removing ack message", err)
 		}
 	}
@@ -113,17 +127,61 @@ func (q Queue) doPopEval(ctx context.Context) (result string, removefn func(), e
 	return result, removefn, nil
 }
 
-// PopMessageWithAck pops a single message from the queue and returns it
-// together with an ack function. Unlike PopMessage, nothing is acknowledged
-// automatically: the caller owns the ack and calls it whenever (and only if)
-// it decides the message was processed. Not calling ack leaves the message on
-// the ack list, so it is redelivered after MessageExpiration — the intended
-// at-least-once behaviour for consumers that fail mid-processing.
+// noopAck is the ack handed back when there is nothing to acknowledge.
+func noopAck(context.Context) error { return nil }
+
+// PopMessageWithAck pops a single message and returns it together with an ack
+// function. Unlike PopMessage, nothing is acknowledged automatically: the
+// caller owns the ack and calls it once it decides the message was processed.
+// Not calling ack leaves the message on the ack list to be redelivered after
+// MessageExpiration -- the intended at-least-once behaviour for consumers that
+// fail mid-processing.
+//
+// ack takes its OWN context rather than closing over this call's. Acking
+// happens after processing, which is exactly when the pop's context is most
+// likely to already be cancelled -- a shutdown, a request timeout -- and an ack
+// bound to a dead context silently does nothing, so the message is reprocessed
+// after MessageExpiration. Pass a live context. ack also returns the error
+// instead of swallowing it, so a failed acknowledgement is visible.
+//
+// ack is safe to call more than once: it is a no-op after it has succeeded, and
+// retryable while it has not. That matters because ack-list entries are
+// "<expiry>|<payload>", so two identical payloads popped within the same second
+// are byte-identical -- a second removal would delete another consumer's
+// in-flight entry.
 //
 // When the queue is empty the error satisfies IsEmptyQueueError. ack is never
-// nil, so it is always safe to call.
-func (q Queue) PopMessageWithAck(ctx context.Context) (msg string, ack func(), err error) {
-	return q.doPopEval(ctx)
+// nil.
+func (q Queue) PopMessageWithAck(ctx context.Context) (msg string, ack func(context.Context) error, err error) {
+	result, ackEntry, err := q.doPopEvalEntry(ctx)
+	if err != nil {
+		return "", noopAck, err
+	}
+	if ackEntry == "" {
+		return result, noopAck, nil
+	}
+
+	ackList := q.getAckList()
+
+	var mu sync.Mutex
+	acked := false
+
+	ack = func(ackCtx context.Context) error {
+		mu.Lock()
+		defer mu.Unlock()
+
+		if acked {
+			return nil
+		}
+		if err := q.RedisClient.LRem(ackCtx, ackList, 1, ackEntry).Err(); err != nil {
+			return err
+		}
+		acked = true
+
+		return nil
+	}
+
+	return result, ack, nil
 }
 
 func (q Queue) PopMessage(ctx context.Context, fn func(msg string) error) error {
@@ -179,10 +237,12 @@ func (q Queue) Channel(ctx context.Context) (channel <-chan *ChannelMessage) {
 					continue
 				}
 
-				if ctx.Err() != nil {
-					// The error is just the cancellation surfacing through the
-					// in-flight Eval; emitting it would make every consumer
-					// filter context.Canceled noise on shutdown.
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					// The cancellation surfacing through the in-flight Eval.
+					// Emitting it would make every consumer filter that noise
+					// on shutdown. Gated on the error and not on ctx.Err() so a
+					// genuine Redis failure that merely coincides with a
+					// shutdown still reaches the consumer.
 					return
 				}
 
