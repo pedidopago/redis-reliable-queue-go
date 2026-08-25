@@ -25,7 +25,9 @@ const (
 )
 
 // ErrAckEntryGone is returned by PopMessageWithAck's ack when the entry it
-// would remove is no longer on the ack list.
+// would remove is no longer on the ack list. It is terminal: do not retry.
+// The entry string cannot reappear, so a retry could only remove another
+// consumer's byte-identical entry.
 var ErrAckEntryGone = errors.New("ack entry is no longer on the ack list")
 
 type Queue struct {
@@ -140,9 +142,11 @@ func noopAck(context.Context) error { return nil }
 // Not calling ack leaves the message on the ack list to be redelivered after
 // MessageExpiration -- the intended at-least-once behaviour for consumers that
 // fail mid-processing. That guarantee has one hole, pre-dating this function:
-// queue.lua trims the ack list to AckLimit right after pushing, keeping the
-// OLDEST entries, so once the list is at the limit a just-popped message is
-// trimmed off immediately and never redelivered.
+// queue.lua trims the ack list right after pushing, keeping the OLDEST
+// AckLimit+1 entries (ltrim's bounds are inclusive), so once the list is at the
+// limit a just-popped message is trimmed off immediately and never redelivered.
+// The trim runs only on the main-list pop path, so the list can drift past the
+// limit via the expiry re-stamp.
 //
 // ack takes its OWN context rather than closing over this call's. Acking
 // happens after processing, which is exactly when the pop's context is most
@@ -151,8 +155,12 @@ func noopAck(context.Context) error { return nil }
 // after MessageExpiration. Pass a live context. ack also returns the error
 // instead of swallowing it, so a failed acknowledgement is visible.
 //
-// ack is safe to call more than once: it is a no-op after it has succeeded, and
-// retryable while it has not. That matters because ack-list entries are
+// ack is safe to call more than once: it is a no-op after a CONFIRMED success,
+// and retryable while it has not succeeded -- except for ErrAckEntryGone, which
+// is terminal. The confirmation matters: if the LRem reaches Redis and executes
+// but its reply is lost, ack reports failure while the removal happened, and a
+// retry can remove another consumer's byte-identical entry. That ambiguity is
+// not solvable with a remove-by-value, so treat a retried ack as best effort. That matters because ack-list entries are
 // "<expiry>|<payload>", so two identical payloads popped within the same second
 // are byte-identical -- a second removal would delete another consumer's
 // in-flight entry.
@@ -185,11 +193,20 @@ func (q Queue) PopMessageWithAck(ctx context.Context) (msg string, ack func(cont
 			return err
 		}
 		if removed == 0 {
-			// Nothing matched: the entry is gone. Either MessageExpiration
-			// elapsed and queue.lua re-stamped it for another consumer, or the
-			// ack list hit AckLimit and it was trimmed away. Reporting success
-			// would record an acknowledgement for a message that may be in
-			// flight elsewhere, so say so instead.
+			// Nothing matched: the entry is gone. MessageExpiration elapsed and
+			// queue.lua re-stamped it for another consumer, or the ack list hit
+			// AckLimit and it was trimmed away, or the list's own TTL expired.
+			// Reporting success would record an acknowledgement for a message
+			// that may be in flight elsewhere, so say so instead.
+			//
+			// Latched as acked even though it failed, because this failure is
+			// terminal: the entry string can never reappear (the re-stamp
+			// writes a new expiry prefix). A retry could only match a
+			// byte-identical entry belonging to whoever else popped the same
+			// payload in the same second, and stealing that would leave THEIR
+			// message unredeliverable.
+			acked = true
+
 			return ErrAckEntryGone
 		}
 		acked = true

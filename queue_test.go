@@ -373,7 +373,10 @@ func TestPopMessageWithAckReportsFailure(t *testing.T) {
 	dead, cancel := context.WithCancel(live)
 	cancel()
 
-	assert.Error(t, ack(dead), "a failed ack must surface, not be swallowed")
+	// Assert the SPECIFIC error: assert.Error alone cannot tell a Redis failure
+	// from ErrAckEntryGone, and a dead context produces removed == 0 too -- so
+	// deleting the error propagation entirely would still leave the test green.
+	assert.ErrorIs(t, ack(dead), context.Canceled, "a failed ack must surface, not be swallowed")
 	// Still retryable: the failure did not mark it acknowledged.
 	assert.NoError(t, ack(live))
 	assert.Equal(t, int64(0), cl.LLen(live, qname+"-ack").Val())
@@ -487,4 +490,45 @@ func TestPopMessageWithAckReportsMissingEntry(t *testing.T) {
 	cl.Del(live, qname+"-ack")
 
 	assert.ErrorIs(t, ack(live), ErrAckEntryGone)
+}
+
+// TestPopMessageWithAckEntryGoneIsTerminal pins that ErrAckEntryGone latches.
+// The entry string can never legitimately reappear -- the expiry re-stamp
+// writes a new prefix -- so a retry could only match a byte-identical entry
+// belonging to whoever else popped the same payload in the same second. Letting
+// the caller retry would hand them a tool for stealing another consumer's
+// in-flight message, which is the very thing the idempotence guard exists to
+// prevent.
+func TestPopMessageWithAckEntryGoneIsTerminal(t *testing.T) {
+	cl := testSetupRedis()
+	defer cl.Close()
+
+	live := context.Background()
+
+	const qname = "microservices_tests_redis_reliable_queue_ack_terminal"
+	cl.Del(live, qname, qname+"-ack")
+	defer cl.Del(live, qname, qname+"-ack")
+
+	q := Queue{RedisClient: cl, Name: qname, MessageExpiration: time.Minute * 5}
+	assert.NoError(t, q.PushMessage(live, "vanishes then reappears"))
+
+	_, ack, err := q.PopMessageWithAck(live)
+	assert.NoError(t, err)
+
+	entries := cl.LRange(live, qname+"-ack", 0, -1).Val()
+	assert.Len(t, entries, 1)
+	entry := entries[0]
+
+	// The trim (or the TTL) takes the entry away.
+	cl.Del(live, qname+"-ack")
+	assert.ErrorIs(t, ack(live), ErrAckEntryGone)
+
+	// Another consumer pops the same payload in the same second, producing a
+	// byte-identical entry.
+	assert.NoError(t, cl.RPush(live, qname+"-ack", entry).Err())
+
+	// A retry must not touch it.
+	assert.NoError(t, ack(live))
+	assert.Equal(t, int64(1), cl.LLen(live, qname+"-ack").Val(),
+		"a retry after ErrAckEntryGone stole another consumer's entry")
 }
