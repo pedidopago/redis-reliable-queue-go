@@ -215,7 +215,7 @@ func TestPopMessageWithAck(t *testing.T) {
 // that never goes idle: with messages always available, the goroutine used to
 // exit through its own loop condition without ever closing the channel,
 // blocking `for msg := range ch` consumers forever.
-func TestChannelSafeClosesOnCancelWithTraffic(t *testing.T) {
+func TestChannelClosesOnCancelWithTraffic(t *testing.T) {
 	cl := testSetupRedis()
 	defer cl.Close()
 
@@ -239,7 +239,7 @@ func TestChannelSafeClosesOnCancelWithTraffic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	ch := q.ChannelSafe(ctx)
+	ch := q.Channel(ctx)
 
 	// consume a few messages so the pop loop is demonstrably active
 	for i := 0; i < 3; i++ {
@@ -264,7 +264,7 @@ func TestChannelSafeClosesOnCancelWithTraffic(t *testing.T) {
 	case <-done:
 		// channel closed: range loop terminated as it must
 	case <-time.After(time.Second * 5):
-		t.Fatal("ChannelSafe(ctx) was not closed after context cancellation on a busy queue")
+		t.Fatal("Channel(ctx) was not closed after context cancellation on a busy queue")
 	}
 }
 
@@ -278,7 +278,7 @@ func TestChannelSafeClosesOnCancelWithTraffic(t *testing.T) {
 // buffer BOTH the fixed and the broken version eventually close ch if a
 // consumer keeps draining -- draining is what unblocks the broken one. The
 // leak only shows when nobody reads, so that is what this test does.
-func TestChannelSafeGoroutineExitsWhenBufferFullAndConsumerStops(t *testing.T) {
+func TestChannelGoroutineExitsWhenBufferFullAndConsumerStops(t *testing.T) {
 	cl := testSetupRedis()
 	defer cl.Close()
 
@@ -305,7 +305,7 @@ func TestChannelSafeGoroutineExitsWhenBufferFullAndConsumerStops(t *testing.T) {
 	baseline := runtime.NumGoroutine()
 
 	ctx, cancel := context.WithCancel(cleanupCtx)
-	ch := q.ChannelSafe(ctx)
+	ch := q.Channel(ctx)
 	_ = ch // deliberately never read: that is the whole point
 
 	time.Sleep(500 * time.Millisecond) // buffer fills, producer parks on a send
@@ -317,7 +317,7 @@ func TestChannelSafeGoroutineExitsWhenBufferFullAndConsumerStops(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatal("ChannelSafe goroutine stayed parked on a full buffer after cancellation")
+	t.Fatal("Channel goroutine stayed parked on a full buffer after cancellation")
 }
 
 // TestPopMessageWithAckSurvivesPopContextCancellation pins the contract that
@@ -420,4 +420,71 @@ func TestPopMessageWithAckDoesNotStealAnotherEntry(t *testing.T) {
 	// A acking again must NOT consume B's still-in-flight entry.
 	assert.NoError(t, ackA(live))
 	assert.Equal(t, int64(1), cl.LLen(live, qname+"-ack").Val(), "second ack stole another consumer's entry")
+}
+
+// TestDeliverPrefersTheBufferOverCancellation pins why deliver tries a
+// non-blocking send first. With a single select, a ready send and a done
+// context are chosen between uniformly, so cancelling would abandon roughly
+// half the in-hand messages even when the buffer had room for them -- each one
+// then costing a full MessageExpiration before it is redelivered.
+//
+// One iteration would prove nothing (a single select delivers ~50% of the
+// time), so this asserts the property over many.
+func TestDeliverPrefersTheBufferOverCancellation(t *testing.T) {
+	const iterations = 200
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already done: both select arms would be ready
+
+	for i := 0; i < iterations; i++ {
+		ch := make(chan *ChannelMessage, 4) // room to spare
+		if !deliver(ctx, ch, &ChannelMessage{Message: "m"}) {
+			t.Fatalf("iteration %d: message abandoned while the buffer had room", i)
+		}
+		assert.Equal(t, 1, len(ch))
+	}
+}
+
+// TestDeliverGivesUpWhenTheBufferIsFull is the other half: with no room and a
+// cancelled context, deliver must return rather than park forever, so the
+// producer can reach its deferred close.
+func TestDeliverGivesUpWhenTheBufferIsFull(t *testing.T) {
+	ch := make(chan *ChannelMessage, 1)
+	ch <- &ChannelMessage{Message: "occupies the buffer"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	assert.False(t, deliver(ctx, ch, &ChannelMessage{Message: "no room"}))
+	assert.Equal(t, 1, len(ch))
+}
+
+// TestPopMessageWithAckReportsMissingEntry pins ErrAckEntryGone. LRem returns a
+// nil error when it matched nothing, so without an explicit count check the ack
+// would report success for a message whose entry is no longer there -- because
+// MessageExpiration elapsed and queue.lua handed it to another consumer, or
+// because the ack list hit AckLimit and it was trimmed away. Recording a
+// successful acknowledgement for a message in flight elsewhere is worse than
+// failing loudly.
+func TestPopMessageWithAckReportsMissingEntry(t *testing.T) {
+	cl := testSetupRedis()
+	defer cl.Close()
+
+	live := context.Background()
+
+	const qname = "microservices_tests_redis_reliable_queue_ack_gone"
+	cl.Del(live, qname, qname+"-ack")
+	defer cl.Del(live, qname, qname+"-ack")
+
+	q := Queue{RedisClient: cl, Name: qname, MessageExpiration: time.Minute * 5}
+	assert.NoError(t, q.PushMessage(live, "entry will vanish"))
+
+	_, ack, err := q.PopMessageWithAck(live)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(1), cl.LLen(live, qname+"-ack").Val())
+
+	// Stand in for the trim or the expiry re-stamp: the entry is simply gone.
+	cl.Del(live, qname+"-ack")
+
+	assert.ErrorIs(t, ack(live), ErrAckEntryGone)
 }

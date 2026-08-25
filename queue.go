@@ -24,6 +24,10 @@ const (
 	DefaultAckLimit = 10000
 )
 
+// ErrAckEntryGone is returned by PopMessageWithAck's ack when the entry it
+// would remove is no longer on the ack list.
+var ErrAckEntryGone = errors.New("ack entry is no longer on the ack list")
+
 type Queue struct {
 	RedisClient           *redis.Client
 	Name                  string
@@ -135,7 +139,10 @@ func noopAck(context.Context) error { return nil }
 // caller owns the ack and calls it once it decides the message was processed.
 // Not calling ack leaves the message on the ack list to be redelivered after
 // MessageExpiration -- the intended at-least-once behaviour for consumers that
-// fail mid-processing.
+// fail mid-processing. That guarantee has one hole, pre-dating this function:
+// queue.lua trims the ack list to AckLimit right after pushing, keeping the
+// OLDEST entries, so once the list is at the limit a just-popped message is
+// trimmed off immediately and never redelivered.
 //
 // ack takes its OWN context rather than closing over this call's. Acking
 // happens after processing, which is exactly when the pop's context is most
@@ -173,8 +180,17 @@ func (q Queue) PopMessageWithAck(ctx context.Context) (msg string, ack func(cont
 		if acked {
 			return nil
 		}
-		if err := q.RedisClient.LRem(ackCtx, ackList, 1, ackEntry).Err(); err != nil {
+		removed, err := q.RedisClient.LRem(ackCtx, ackList, 1, ackEntry).Result()
+		if err != nil {
 			return err
+		}
+		if removed == 0 {
+			// Nothing matched: the entry is gone. Either MessageExpiration
+			// elapsed and queue.lua re-stamped it for another consumer, or the
+			// ack list hit AckLimit and it was trimmed away. Reporting success
+			// would record an acknowledgement for a message that may be in
+			// flight elsewhere, so say so instead.
+			return ErrAckEntryGone
 		}
 		acked = true
 
@@ -212,87 +228,45 @@ type ChannelMessage struct {
 	AckMessage func()
 }
 
+// deliver sends m on ch, preferring the buffer: only when the buffer is full
+// does it race the cancellation. A single select would choose uniformly between
+// a ready send and a done context, so cancelling would drop roughly half the
+// in-hand messages even with a consumer still draining, each costing a full
+// MessageExpiration before redelivery.
+//
+// Reports whether the producer should keep running. Abandoning a message leaves
+// it unacked, so it is redelivered after MessageExpiration.
+func deliver(ctx context.Context, ch chan<- *ChannelMessage, m *ChannelMessage) bool {
+	select {
+	case ch <- m:
+		return true
+	default:
+	}
+
+	select {
+	case ch <- m:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func (q Queue) Channel(ctx context.Context) (channel <-chan *ChannelMessage) {
 	ch := make(chan *ChannelMessage, 256)
 
 	go func() {
-		for ctx.Err() == nil {
-			result, removefn, err := q.doPopEval(ctx)
-
-			if err != nil {
-
-				if err == redis.Nil {
-					select {
-					case <-ctx.Done():
-						close(ch)
-
-						return
-					case <-time.After(time.Millisecond * 100):
-						// noop
-					}
-					continue
-				}
-
-				ch <- &ChannelMessage{Err: err, AckMessage: q.noop}
-				continue
-			}
-
-			if result == "" {
-				select {
-				case <-ctx.Done():
-					close(ch)
-
-					return
-				case <-time.After(time.Millisecond * 100):
-					// noop
-				}
-				continue
-			}
-
-			ch <- &ChannelMessage{
-				Message:    result,
-				AckMessage: removefn,
-			}
-		}
-	}()
-
-	return ch
-}
-
-// ChannelSafe is Channel with a lifecycle that terminates cleanly on
-// cancellation. Channel is left exactly as it is: it is public API on a
-// released major version, so its observable behaviour must not shift under
-// existing callers.
-//
-// Three differences, all on the shutdown path:
-//
-//  1. The channel is closed on EVERY exit. Channel only closes it from its two
-//     idle branches, so when the loop exits at `for ctx.Err() == nil` -- the
-//     guaranteed path on a queue with traffic -- it returns leaving the channel
-//     open, and `for msg := range ch` blocks forever. Under a sync.WaitGroup
-//     that turns SIGTERM into a hang until the process is killed.
-//
-//  2. Both sends select on ctx.Done(). A bare send blocks forever once the
-//     256-slot buffer fills and the consumer stops reading, so the goroutine
-//     never returns and the deferred close never runs -- the same hang by a
-//     different route. Abandoning a message this way leaves it unacked, so it
-//     is redelivered after MessageExpiration.
-//
-//  3. A cancellation surfacing through the in-flight Eval is not emitted as
-//     ChannelMessage{Err: context.Canceled}, so consumers do not have to filter
-//     that noise on every shutdown. Gated on the error rather than on ctx.Err()
-//     so a genuine Redis failure that merely coincides with a shutdown still
-//     reaches the consumer.
-func (q Queue) ChannelSafe(ctx context.Context) (channel <-chan *ChannelMessage) {
-	ch := make(chan *ChannelMessage, 256)
-
-	go func() {
+		// Close on every exit path. Closing only from the two idle branches
+		// left ch open forever whenever the loop exited at `for ctx.Err() ==
+		// nil` instead -- the guaranteed path on a queue with traffic -- so
+		// `for msg := range ch` never returned. Under a sync.WaitGroup that
+		// turns SIGTERM into a hang until the process is killed.
 		defer close(ch)
 
 		for ctx.Err() == nil {
 			result, removefn, err := q.doPopEval(ctx)
 
 			if err != nil {
+
 				if err == redis.Nil {
 					select {
 					case <-ctx.Done():
@@ -303,13 +277,7 @@ func (q Queue) ChannelSafe(ctx context.Context) (channel <-chan *ChannelMessage)
 					continue
 				}
 
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return
-				}
-
-				select {
-				case ch <- &ChannelMessage{Err: err, AckMessage: q.noop}:
-				case <-ctx.Done():
+				if !deliver(ctx, ch, &ChannelMessage{Err: err, AckMessage: q.noop}) {
 					return
 				}
 				continue
@@ -325,12 +293,10 @@ func (q Queue) ChannelSafe(ctx context.Context) (channel <-chan *ChannelMessage)
 				continue
 			}
 
-			select {
-			case ch <- &ChannelMessage{
+			if !deliver(ctx, ch, &ChannelMessage{
 				Message:    result,
 				AckMessage: removefn,
-			}:
-			case <-ctx.Done():
+			}) {
 				return
 			}
 		}
