@@ -186,7 +186,11 @@ func (q Queue) Channel(ctx context.Context) (channel <-chan *ChannelMessage) {
 					return
 				}
 
-				ch <- &ChannelMessage{Err: err, AckMessage: q.noop}
+				select {
+				case ch <- &ChannelMessage{Err: err, AckMessage: q.noop}:
+				case <-ctx.Done():
+					return
+				}
 				continue
 			}
 
@@ -200,9 +204,23 @@ func (q Queue) Channel(ctx context.Context) (channel <-chan *ChannelMessage) {
 				continue
 			}
 
-			ch <- &ChannelMessage{
+			// Both sends select on ctx.Done() so the goroutine can always
+			// reach its deferred close. A bare send blocks forever once the
+			// 256-slot buffer fills and the consumer stops reading -- which is
+			// precisely what happens on shutdown -- and a goroutine parked
+			// there never returns, so the deferred close never runs and every
+			// `for msg := range ch` consumer hangs anyway.
+			//
+			// Bailing out here leaves the message unacked, so it is redelivered
+			// after MessageExpiration. That is the correct trade: the caller
+			// never saw it, and at-least-once is this queue's contract.
+			select {
+			case ch <- &ChannelMessage{
 				Message:    result,
 				AckMessage: removefn,
+			}:
+			case <-ctx.Done():
+				return
 			}
 		}
 	}()

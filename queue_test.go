@@ -3,6 +3,7 @@ package rq
 import (
 	"context"
 	"os"
+	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -259,4 +260,56 @@ func TestChannelClosesOnCancelWithTraffic(t *testing.T) {
 	case <-time.After(time.Second * 5):
 		t.Fatal("Channel(ctx) was not closed after context cancellation on a busy queue")
 	}
+}
+
+// TestChannelGoroutineExitsWhenBufferFullAndConsumerStops covers the last exit
+// without a close: a bare send blocks forever once the 256-slot buffer fills
+// and the consumer stops reading, so the goroutine never returns and the
+// deferred close never runs. That is the shape shutdown produces, since the
+// consumer stops reading before the producer notices the cancellation.
+//
+// The assertion is on the goroutine, not on the channel closing: with a full
+// buffer BOTH the fixed and the broken version eventually close ch if a
+// consumer keeps draining -- draining is what unblocks the broken one. The
+// leak only shows when nobody reads, so that is what this test does.
+func TestChannelGoroutineExitsWhenBufferFullAndConsumerStops(t *testing.T) {
+	cl := testSetupRedis()
+	defer cl.Close()
+
+	const qname = "microservices_tests_redis_reliable_queue_buffer_full"
+	cleanupCtx := context.Background()
+	cl.Del(cleanupCtx, qname, qname+"-ack")
+	defer cl.Del(cleanupCtx, qname, qname+"-ack")
+
+	q := Queue{RedisClient: cl, Name: qname}
+
+	// Comfortably more than the 256-slot buffer, so the producer is guaranteed
+	// to be parked on a send rather than on an idle poll when we cancel.
+	for i := 0; i < 400; i++ {
+		if err := q.PushMessage(cleanupCtx, "m"+strconv.Itoa(i)); err != nil {
+			t.Fatalf("PushMessage: %v", err)
+		}
+	}
+
+	// Warm the client so its lazily-spawned goroutines are not counted below.
+	if err := cl.Ping(cleanupCtx).Err(); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+	runtime.GC()
+	baseline := runtime.NumGoroutine()
+
+	ctx, cancel := context.WithCancel(cleanupCtx)
+	ch := q.Channel(ctx)
+	_ = ch // deliberately never read: that is the whole point
+
+	time.Sleep(500 * time.Millisecond) // buffer fills, producer parks on a send
+	cancel()
+
+	for i := 0; i < 50; i++ {
+		if runtime.NumGoroutine() <= baseline {
+			return // the producer goroutine returned and ran its deferred close
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("Channel goroutine stayed parked on a full buffer after cancellation")
 }
