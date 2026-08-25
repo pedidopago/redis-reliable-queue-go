@@ -145,8 +145,11 @@ func noopAck(context.Context) error { return nil }
 // queue.lua trims the ack list right after pushing, keeping the OLDEST
 // AckLimit+1 entries (ltrim's bounds are inclusive), so once the list is at the
 // limit a just-popped message is trimmed off immediately and never redelivered.
-// The trim runs only on the main-list pop path, so the list can drift past the
-// limit via the expiry re-stamp.
+//
+// The bound is hard: the expiry re-stamp pairs its rpush with an lrem, so the
+// main-list pop is the only path that lengthens the list, and the trim follows
+// it immediately. What is wrong is which entry is discarded -- the freshly
+// claimed one rather than the stalest -- not how strictly the limit is applied.
 //
 // ack takes its OWN context rather than closing over this call's. Acking
 // happens after processing, which is exactly when the pop's context is most
