@@ -216,17 +216,83 @@ func (q Queue) Channel(ctx context.Context) (channel <-chan *ChannelMessage) {
 	ch := make(chan *ChannelMessage, 256)
 
 	go func() {
-		// Close on every exit path. Closing only from the idle branches left
-		// ch open forever when the loop exited via its own condition (e.g. a
-		// context cancelled on a queue with traffic), permanently blocking
-		// consumers doing `for msg := range ch`.
+		for ctx.Err() == nil {
+			result, removefn, err := q.doPopEval(ctx)
+
+			if err != nil {
+
+				if err == redis.Nil {
+					select {
+					case <-ctx.Done():
+						close(ch)
+
+						return
+					case <-time.After(time.Millisecond * 100):
+						// noop
+					}
+					continue
+				}
+
+				ch <- &ChannelMessage{Err: err, AckMessage: q.noop}
+				continue
+			}
+
+			if result == "" {
+				select {
+				case <-ctx.Done():
+					close(ch)
+
+					return
+				case <-time.After(time.Millisecond * 100):
+					// noop
+				}
+				continue
+			}
+
+			ch <- &ChannelMessage{
+				Message:    result,
+				AckMessage: removefn,
+			}
+		}
+	}()
+
+	return ch
+}
+
+// ChannelSafe is Channel with a lifecycle that terminates cleanly on
+// cancellation. Channel is left exactly as it is: it is public API on a
+// released major version, so its observable behaviour must not shift under
+// existing callers.
+//
+// Three differences, all on the shutdown path:
+//
+//  1. The channel is closed on EVERY exit. Channel only closes it from its two
+//     idle branches, so when the loop exits at `for ctx.Err() == nil` -- the
+//     guaranteed path on a queue with traffic -- it returns leaving the channel
+//     open, and `for msg := range ch` blocks forever. Under a sync.WaitGroup
+//     that turns SIGTERM into a hang until the process is killed.
+//
+//  2. Both sends select on ctx.Done(). A bare send blocks forever once the
+//     256-slot buffer fills and the consumer stops reading, so the goroutine
+//     never returns and the deferred close never runs -- the same hang by a
+//     different route. Abandoning a message this way leaves it unacked, so it
+//     is redelivered after MessageExpiration.
+//
+//  3. A cancellation surfacing through the in-flight Eval is not emitted as
+//     ChannelMessage{Err: context.Canceled}, so consumers do not have to filter
+//     that noise on every shutdown. Gated on the error rather than on ctx.Err()
+//     so a genuine Redis failure that merely coincides with a shutdown still
+//     reaches the consumer.
+func (q Queue) ChannelSafe(ctx context.Context) (channel <-chan *ChannelMessage) {
+	ch := make(chan *ChannelMessage, 256)
+
+	go func() {
 		defer close(ch)
 
 		for ctx.Err() == nil {
 			result, removefn, err := q.doPopEval(ctx)
 
 			if err != nil {
-
 				if err == redis.Nil {
 					select {
 					case <-ctx.Done():
@@ -238,11 +304,6 @@ func (q Queue) Channel(ctx context.Context) (channel <-chan *ChannelMessage) {
 				}
 
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					// The cancellation surfacing through the in-flight Eval.
-					// Emitting it would make every consumer filter that noise
-					// on shutdown. Gated on the error and not on ctx.Err() so a
-					// genuine Redis failure that merely coincides with a
-					// shutdown still reaches the consumer.
 					return
 				}
 
@@ -264,16 +325,6 @@ func (q Queue) Channel(ctx context.Context) (channel <-chan *ChannelMessage) {
 				continue
 			}
 
-			// Both sends select on ctx.Done() so the goroutine can always
-			// reach its deferred close. A bare send blocks forever once the
-			// 256-slot buffer fills and the consumer stops reading -- which is
-			// precisely what happens on shutdown -- and a goroutine parked
-			// there never returns, so the deferred close never runs and every
-			// `for msg := range ch` consumer hangs anyway.
-			//
-			// Bailing out here leaves the message unacked, so it is redelivered
-			// after MessageExpiration. That is the correct trade: the caller
-			// never saw it, and at-least-once is this queue's contract.
 			select {
 			case ch <- &ChannelMessage{
 				Message:    result,

@@ -215,7 +215,7 @@ func TestPopMessageWithAck(t *testing.T) {
 // that never goes idle: with messages always available, the goroutine used to
 // exit through its own loop condition without ever closing the channel,
 // blocking `for msg := range ch` consumers forever.
-func TestChannelClosesOnCancelWithTraffic(t *testing.T) {
+func TestChannelSafeClosesOnCancelWithTraffic(t *testing.T) {
 	cl := testSetupRedis()
 	defer cl.Close()
 
@@ -239,7 +239,7 @@ func TestChannelClosesOnCancelWithTraffic(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	ch := q.Channel(ctx)
+	ch := q.ChannelSafe(ctx)
 
 	// consume a few messages so the pop loop is demonstrably active
 	for i := 0; i < 3; i++ {
@@ -264,7 +264,7 @@ func TestChannelClosesOnCancelWithTraffic(t *testing.T) {
 	case <-done:
 		// channel closed: range loop terminated as it must
 	case <-time.After(time.Second * 5):
-		t.Fatal("Channel(ctx) was not closed after context cancellation on a busy queue")
+		t.Fatal("ChannelSafe(ctx) was not closed after context cancellation on a busy queue")
 	}
 }
 
@@ -278,7 +278,7 @@ func TestChannelClosesOnCancelWithTraffic(t *testing.T) {
 // buffer BOTH the fixed and the broken version eventually close ch if a
 // consumer keeps draining -- draining is what unblocks the broken one. The
 // leak only shows when nobody reads, so that is what this test does.
-func TestChannelGoroutineExitsWhenBufferFullAndConsumerStops(t *testing.T) {
+func TestChannelSafeGoroutineExitsWhenBufferFullAndConsumerStops(t *testing.T) {
 	cl := testSetupRedis()
 	defer cl.Close()
 
@@ -305,7 +305,7 @@ func TestChannelGoroutineExitsWhenBufferFullAndConsumerStops(t *testing.T) {
 	baseline := runtime.NumGoroutine()
 
 	ctx, cancel := context.WithCancel(cleanupCtx)
-	ch := q.Channel(ctx)
+	ch := q.ChannelSafe(ctx)
 	_ = ch // deliberately never read: that is the whole point
 
 	time.Sleep(500 * time.Millisecond) // buffer fills, producer parks on a send
@@ -317,7 +317,7 @@ func TestChannelGoroutineExitsWhenBufferFullAndConsumerStops(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatal("Channel goroutine stayed parked on a full buffer after cancellation")
+	t.Fatal("ChannelSafe goroutine stayed parked on a full buffer after cancellation")
 }
 
 // TestPopMessageWithAckSurvivesPopContextCancellation pins the contract that
