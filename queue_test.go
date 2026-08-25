@@ -157,3 +157,106 @@ func TestAutoAckRecover(t *testing.T) {
 		}
 	}
 }
+
+func TestPopMessageWithAck(t *testing.T) {
+	cl := testSetupRedis()
+	defer cl.Close()
+
+	ctx, cf := context.WithTimeout(context.Background(), time.Second*20)
+	defer cf()
+
+	const qname = "microservices_tests_redis_reliable_queue_pop_with_ack"
+	cl.Del(ctx, qname, qname+"-ack")
+	defer cl.Del(ctx, qname, qname+"-ack")
+
+	q := Queue{
+		RedisClient:           cl,
+		Name:                  qname,
+		MessageExpiration:     time.Minute * 5,
+		ListExpirationSeconds: "3600",
+	}
+
+	assert.NoError(t, q.PushMessage(ctx, "with ack 1"))
+	assert.NoError(t, q.PushMessage(ctx, "with ack 2"))
+
+	// pop + ack: the message must leave the ack list
+	msg, ack, err := q.PopMessageWithAck(ctx)
+	assert.NoError(t, err)
+	assert.Equal(t, "with ack 1", msg)
+	assert.Equal(t, int64(1), cl.LLen(ctx, qname+"-ack").Val())
+	ack()
+	assert.Equal(t, int64(0), cl.LLen(ctx, qname+"-ack").Val())
+
+	// pop without ack: the message must stay on the ack list for redelivery
+	msg, _, err = q.PopMessageWithAck(ctx)
+	assert.NoError(t, err)
+	assert.Equal(t, "with ack 2", msg)
+	assert.Equal(t, int64(1), cl.LLen(ctx, qname+"-ack").Val())
+
+	// empty queue: error must be recognizable, ack must be safe to call
+	msg, ack, err = q.PopMessageWithAck(ctx)
+	assert.True(t, IsEmptyQueueError(err))
+	assert.Equal(t, "", msg)
+	assert.NotNil(t, ack)
+	ack()
+
+	// the unacked message is still there, untouched by the empty pop
+	assert.Equal(t, int64(1), cl.LLen(ctx, qname+"-ack").Val())
+}
+
+// TestChannelClosesOnCancelWithTraffic exercises the shutdown path on a queue
+// that never goes idle: with messages always available, the goroutine used to
+// exit through its own loop condition without ever closing the channel,
+// blocking `for msg := range ch` consumers forever.
+func TestChannelClosesOnCancelWithTraffic(t *testing.T) {
+	cl := testSetupRedis()
+	defer cl.Close()
+
+	const qname = "microservices_tests_redis_reliable_queue_channel_close"
+	cleanupCtx := context.Background()
+	cl.Del(cleanupCtx, qname, qname+"-ack")
+	defer cl.Del(cleanupCtx, qname, qname+"-ack")
+
+	q := Queue{
+		RedisClient:           cl,
+		Name:                  qname,
+		MessageExpiration:     time.Minute * 5,
+		ListExpirationSeconds: "3600",
+	}
+
+	// enough traffic that the goroutine never reaches an idle branch
+	for i := 0; i < 500; i++ {
+		assert.NoError(t, q.PushMessage(cleanupCtx, "traffic "+strconv.Itoa(i)))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch := q.Channel(ctx)
+
+	// consume a few messages so the pop loop is demonstrably active
+	for i := 0; i < 3; i++ {
+		msg := <-ch
+		assert.NoError(t, msg.Err)
+		msg.AckMessage()
+	}
+
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for msg := range ch {
+			if msg.Err == nil {
+				msg.AckMessage()
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+		// channel closed: range loop terminated as it must
+	case <-time.After(time.Second * 5):
+		t.Fatal("Channel(ctx) was not closed after context cancellation on a busy queue")
+	}
+}

@@ -113,6 +113,19 @@ func (q Queue) doPopEval(ctx context.Context) (result string, removefn func(), e
 	return result, removefn, nil
 }
 
+// PopMessageWithAck pops a single message from the queue and returns it
+// together with an ack function. Unlike PopMessage, nothing is acknowledged
+// automatically: the caller owns the ack and calls it whenever (and only if)
+// it decides the message was processed. Not calling ack leaves the message on
+// the ack list, so it is redelivered after MessageExpiration — the intended
+// at-least-once behaviour for consumers that fail mid-processing.
+//
+// When the queue is empty the error satisfies IsEmptyQueueError. ack is never
+// nil, so it is always safe to call.
+func (q Queue) PopMessageWithAck(ctx context.Context) (msg string, ack func(), err error) {
+	return q.doPopEval(ctx)
+}
+
 func (q Queue) PopMessage(ctx context.Context, fn func(msg string) error) error {
 	result, removefn, err := q.doPopEval(ctx)
 
@@ -145,6 +158,12 @@ func (q Queue) Channel(ctx context.Context) (channel <-chan *ChannelMessage) {
 	ch := make(chan *ChannelMessage, 256)
 
 	go func() {
+		// Close on every exit path. Closing only from the idle branches left
+		// ch open forever when the loop exited via its own condition (e.g. a
+		// context cancelled on a queue with traffic), permanently blocking
+		// consumers doing `for msg := range ch`.
+		defer close(ch)
+
 		for ctx.Err() == nil {
 			result, removefn, err := q.doPopEval(ctx)
 
@@ -153,13 +172,18 @@ func (q Queue) Channel(ctx context.Context) (channel <-chan *ChannelMessage) {
 				if err == redis.Nil {
 					select {
 					case <-ctx.Done():
-						close(ch)
-
 						return
 					case <-time.After(time.Millisecond * 100):
 						// noop
 					}
 					continue
+				}
+
+				if ctx.Err() != nil {
+					// The error is just the cancellation surfacing through the
+					// in-flight Eval; emitting it would make every consumer
+					// filter context.Canceled noise on shutdown.
+					return
 				}
 
 				ch <- &ChannelMessage{Err: err, AckMessage: q.noop}
@@ -169,8 +193,6 @@ func (q Queue) Channel(ctx context.Context) (channel <-chan *ChannelMessage) {
 			if result == "" {
 				select {
 				case <-ctx.Done():
-					close(ch)
-
 					return
 				case <-time.After(time.Millisecond * 100):
 					// noop
