@@ -155,15 +155,20 @@ func noopAck(context.Context) error { return nil }
 // after MessageExpiration. Pass a live context. ack also returns the error
 // instead of swallowing it, so a failed acknowledgement is visible.
 //
-// ack is safe to call more than once: it is a no-op after a CONFIRMED success,
-// and retryable while it has not succeeded -- except for ErrAckEntryGone, which
-// is terminal. The confirmation matters: if the LRem reaches Redis and executes
-// but its reply is lost, ack reports failure while the removal happened, and a
-// retry can remove another consumer's byte-identical entry. That ambiguity is
-// not solvable with a remove-by-value, so treat a retried ack as best effort. That matters because ack-list entries are
-// "<expiry>|<payload>", so two identical payloads popped within the same second
-// are byte-identical -- a second removal would delete another consumer's
-// in-flight entry.
+// ack is safe to call more than once: a no-op after a confirmed success, and
+// retryable while it has not succeeded -- except for ErrAckEntryGone, which is
+// terminal.
+//
+// Idempotence matters here because ack-list entries are "<expiry>|<payload>".
+// Two identical payloads popped within the same second produce byte-identical
+// entries, and removal is by value, so a second removal would delete whichever
+// entry another consumer is still holding.
+//
+// "Confirmed" is doing real work in that first sentence. If the LRem reaches
+// Redis and executes but its reply is lost, ack reports failure while the
+// removal already happened, and a retry can steal that byte-identical entry
+// anyway. Remove-by-value cannot close that gap, so treat a retried ack as best
+// effort.
 //
 // When the queue is empty the error satisfies IsEmptyQueueError. ack is never
 // nil.
@@ -199,12 +204,11 @@ func (q Queue) PopMessageWithAck(ctx context.Context) (msg string, ack func(cont
 			// Reporting success would record an acknowledgement for a message
 			// that may be in flight elsewhere, so say so instead.
 			//
-			// Latched as acked even though it failed, because this failure is
-			// terminal: the entry string can never reappear (the re-stamp
-			// writes a new expiry prefix). A retry could only match a
-			// byte-identical entry belonging to whoever else popped the same
-			// payload in the same second, and stealing that would leave THEIR
-			// message unredeliverable.
+			// Latched even though it failed, because this failure is terminal:
+			// the entry string can never reappear, since the re-stamp writes a
+			// new expiry prefix. A retry could then only match a byte-identical
+			// entry belonging to another consumer -- see the idempotence note
+			// on PopMessageWithAck.
 			acked = true
 
 			return ErrAckEntryGone
